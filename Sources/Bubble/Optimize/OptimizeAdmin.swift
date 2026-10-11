@@ -127,10 +127,15 @@ struct OptimizeLog {
     var deferred: Set<OptimizeAdmin.Job> = []
     /// Whether Bubble will do the deferred jobs itself (changes how Mole's skips read).
     var adminTasksOn: Bool
+    /// Task titles Bubble had Mole skip for lack of Full Disk Access (`OptimizeWhitelist`).
+    var skippedForFullDiskAccess: Set<String>
 
-    init(adminTasksOn: Bool) {
+    init(adminTasksOn: Bool, skippedForFullDiskAccess: Set<String> = []) {
         self.adminTasksOn = adminTasksOn
+        self.skippedForFullDiskAccess = skippedForFullDiskAccess
     }
+
+    static let fullDiskAccessSkip = "- Skipped: needs Full Disk Access"
 
     mutating func consume(_ line: String) {
         let text = Self.body(line)
@@ -144,7 +149,9 @@ struct OptimizeLog {
         if line.contains("admin access not granted") { moleSkippedAdmin = true }
         guard !tasks.isEmpty, let first = line.first, "→◎-✓✗".contains(first) else { return }
         var result = line
-        if Self.isAdminSkip(text) {
+        if text.hasPrefix("Skipped (whitelisted)"), let task = tasks.last, skippedForFullDiskAccess.contains(task.name) {
+            result = Self.fullDiskAccessSkip
+        } else if Self.isAdminSkip(text) {
             moleSkippedAdmin = true
             let job = Self.deferredJob(text)
             if let job { deferred.insert(job) }

@@ -44,6 +44,8 @@ final class OptimizeModel {
     var expectedAdminRows = 0
     /// Prompts Mole showed that Bubble declined rather than confirm on your behalf.
     var skippedPrompts: [String] = []
+    /// Tasks Mole skipped because Bubble has no Full Disk Access.
+    var skippedForFullDiskAccess: Set<String> = []
     /// The user pressed Stop during this run.
     var stopped = false
     private var job: Task<Void, Never>?
@@ -64,7 +66,12 @@ final class OptimizeModel {
         }
         guard !planning, Shell.mo != nil else { return }
         planning = true
-        defer { planning = false }
+        // The dry run runs every task's checks too, so it skips the same protected-data tasks.
+        _ = OptimizeWhitelist.begin(fullDiskAccess: MoleInstall.hasFullDiskAccess)
+        defer {
+            OptimizeWhitelist.end()
+            planning = false
+        }
         let text = await Shell.moText(["optimize", "--dry-run"])
         let n = text.split(separator: "\n").filter { $0.trimmingCharacters(in: .whitespaces).hasPrefix("➤") }.count
         guard n > 0 else { return }
@@ -83,14 +90,19 @@ final class OptimizeModel {
         authorizing = false
         stopped = false
         expectedAdminRows = adminTasks ? 1 : 0
+        skippedForFullDiskAccess = []
         job = Task {
+            // Without Full Disk Access, tasks that read other apps' data would set off a
+            // stream of privacy prompts; Mole skips them for this run.
+            let fdaSkips = OptimizeWhitelist.begin(fullDiskAccess: MoleInstall.hasFullDiskAccess)
+            defer { OptimizeWhitelist.end() }
             // Mole runs without admin rights: sudo is unavailable to it, and should its
             // password prompt appear anyway, the responder ends it at once (no dialog).
             let shim = MoleNoSudo.make()
             defer { MoleNoSudo.remove(shim) }
             let session = PTYSession(mo, ["optimize"], environment: MoleNoSudo.environment(shimDir: shim))
             let responder = PromptResponder(reason: "", policy: .optimize)
-            var log = OptimizeLog(adminTasksOn: adminTasks)
+            var log = OptimizeLog(adminTasksOn: adminTasks, skippedForFullDiskAccess: fdaSkips)
             for await line in session.lines {
                 if responder.handle(line, session) { continue }
                 log.consume(line)
@@ -100,6 +112,7 @@ final class OptimizeModel {
                 if !log.moleSkippedAdmin && !responder.adminSkipped && !tasks.isEmpty { expectedAdminRows = 0 }
             }
             skippedPrompts = responder.skippedPrompts
+            skippedForFullDiskAccess = Set(tasks.filter { $0.results.contains(OptimizeLog.fullDiskAccessSkip) }.map(\.name))
             let moleSkippedAdmin = log.moleSkippedAdmin || responder.adminSkipped
             if !stopped && !Task.isCancelled && !tasks.isEmpty && moleSkippedAdmin {
                 if adminTasks {
@@ -269,6 +282,14 @@ struct OptimizeView: View {
                 VStack(alignment: .leading, spacing: Space.xs) {
                     Text(model.stopped ? "Maintenance stopped" : "Maintenance complete").font(.ui(.title, .bold))
                     Text(summary).font(.ui(.body)).foregroundStyle(Palette.secondary)
+                    if !model.skippedForFullDiskAccess.isEmpty {
+                        HStack(spacing: Space.xs) {
+                            Text("\(model.skippedForFullDiskAccess.count) skipped to avoid privacy prompts.")
+                            LinkButton(title: "Allow Full Disk Access", color: Palette.accent) { SystemSettings.openFullDiskAccess() }
+                            Text("to include them next time.")
+                        }
+                        .font(.ui(.secondary)).foregroundStyle(Palette.tertiary)
+                    }
                     ForEach(model.skippedPrompts, id: \.self) { p in
                         Label("Skipped: \(p)", systemImage: "hand.raised")
                             .font(.ui(.secondary)).foregroundStyle(Palette.amber)

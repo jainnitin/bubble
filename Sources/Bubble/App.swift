@@ -90,6 +90,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.activate(ignoringOtherApps: true)
         // If a previous selective clean was interrupted, put the user's whitelist back.
         Whitelist.restoreIfNeeded()
+        OptimizeWhitelist.restoreStale()
         StatusModel.shared.start()
         // Creating the updater starts Sparkle's scheduled background checks.
         _ = Updater.shared
