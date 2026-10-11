@@ -380,19 +380,32 @@ struct FanOrSystemCard: View {
 
 struct ProcessTable: View {
     @Environment(StatusModel.self) private var model
+    @Environment(\.screenVisible) private var visible
     @State private var sort: Column = .mem
     @State private var pendingKill: ProcessSampler.Process?
     @State private var killError: String?
+    @State private var shown = Shown()
 
     enum Column { case name, mem, cpu, pid }
 
+    /// The rows last drawn. On a hidden section the table neither reads nor sorts the
+    /// process list (so new samples don't redraw it) and keeps these while it fades out.
+    private final class Shown {
+        var procs: [ProcessSampler.Process] = []
+        var total = 0
+    }
+
     var body: some View {
         // The full process list (ps), not just mo's top five. Show the top 120 for the chosen sort.
-        let procs = Array(sorted(model.processes).prefix(120))
-        Card(padding: 0) {
+        if visible {
+            shown.procs = Array(sorted(model.processes).prefix(120))
+            shown.total = model.processes.count
+        }
+        let procs = shown.procs
+        return Card(padding: 0) {
             VStack(spacing: 0) {
                 HStack {
-                    header("Process (\(model.processes.count))", .name).frame(maxWidth: .infinity, alignment: .leading)
+                    header("Process (\(shown.total))", .name).frame(maxWidth: .infinity, alignment: .leading)
                     header("Memory", .mem).frame(width: 110, alignment: .trailing)
                     header("CPU %", .cpu).frame(width: 190, alignment: .trailing)
                     header("PID", .pid).frame(width: 110, alignment: .trailing)

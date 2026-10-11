@@ -96,7 +96,10 @@ struct MenuBarPanel: View {
             }
             .ignoresSafeArea()
         }
-        .task { await model.refreshHistory() }
+        // Sampling runs at full rate only while the panel (or the Status section) is showing.
+        .onAppear { model.panelVisibilityChanged(true) }
+        .onDisappear { model.panelVisibilityChanged(false) }
+        .task { await model.refreshHistory(force: false) }
     }
 
     private func mini<S: View>(_ icon: String, _ title: String, _ value: String, _ unit: String, @ViewBuilder spark: () -> S) -> some View {

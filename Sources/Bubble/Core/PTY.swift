@@ -28,7 +28,8 @@ final class PTYSession: @unchecked Sendable {
     private let process: Process
     private let input = Pipe()
     private let state = State()
-    private let exit = Exit()
+    private let exit = Latch<Int32>()
+    private let launched = Latch<Bool>()
     static let promptIdle: TimeInterval = 0.15
     /// Ctrl-D. Typed at sudo's password prompt it ends input, so sudo gives up at once
     /// ("no password was provided") instead of counting an empty password as a failed
@@ -40,13 +41,12 @@ final class PTYSession: @unchecked Sendable {
         var generation = 0
         var chunks = 0
         var finished = false
-        var launched = false
+        /// Guards `stopped` and the start of the process. Separate from `lock`, which is
+        /// held while the stream finishes (and finishing the stream calls `stop()`).
+        let launchLock = NSLock()
+        /// Set by `stop()`; a process not started by then never is.
+        var stopped = false
         var lastDelivered: (line: String, prompt: Bool, chunks: Int)?
-
-        func isLaunched() -> Bool {
-            lock.lock(); defer { lock.unlock() }
-            return launched
-        }
 
         func deliver(_ line: String, prompt: Bool, chunks: Int) {
             lock.lock(); defer { lock.unlock() }
@@ -54,15 +54,18 @@ final class PTYSession: @unchecked Sendable {
         }
     }
 
-    /// The exit status, filled in by the process's termination handler. `waitUntilExit` on
-    /// a worker thread can miss the exit and wait forever, so waiters park here instead.
-    private final class Exit: @unchecked Sendable {
+    /// A value set once, from any thread, that async callers can wait for. Holds the exit
+    /// status (filled in by the process's termination handler: `waitUntilExit` on a worker
+    /// thread can miss the exit and wait forever, so waiters park here instead) and whether
+    /// the process was started at all.
+    private final class Latch<Value: Sendable>: @unchecked Sendable {
         private let lock = NSLock()
-        private var status: Int32?
-        private var waiters: [CheckedContinuation<Int32, Never>] = []
+        private var status: Value?
+        private var waiters: [CheckedContinuation<Value, Never>] = []
 
-        func finish(_ s: Int32) {
+        func finish(_ s: Value) {
             lock.lock()
+            guard status == nil else { lock.unlock(); return }
             status = s
             let ready = waiters
             waiters = []
@@ -70,7 +73,7 @@ final class PTYSession: @unchecked Sendable {
             ready.forEach { $0.resume(returning: s) }
         }
 
-        func wait() async -> Int32 {
+        func wait() async -> Value {
             await withCheckedContinuation { cont in
                 lock.lock()
                 if let status {
@@ -106,7 +109,6 @@ final class PTYSession: @unchecked Sendable {
         self.sudoPrompt = sudoPrompt
         let input = self.input
         let state = self.state
-        let refusal = Shell.refusal(exe)
         let process = Shell.makeProcess("/usr/bin/script", ["-q", "/dev/null", exe] + args,
                                         environment: Shell.childEnvironment(environment.merging(["COLUMNS": "160", "SUDO_PROMPT": sudoPrompt]) { _, own in own }))
         self.process = process
@@ -115,47 +117,16 @@ final class PTYSession: @unchecked Sendable {
         process.standardError = out
         process.standardInput = input
         let exit = self.exit
+        let launched = self.launched
         process.terminationHandler = { exit.finish($0.terminationStatus) }
 
         let tagged = AsyncStream<(String, Bool, Int)> { cont in
-            if let refusal {
-                cont.yield((refusal, false, 0))
-                cont.finish()
-                return
-            }
-            // Every read, its lines and the counters move together under the state lock,
-            // so the idle check below never sees a half-processed chunk.
-            let buffer = Shell.LineBuffer()
-            Shell.readLines(from: out, into: buffer, lock: state.lock, onLines: { lines in
-                state.generation += 1
-                state.chunks += 1
-                for line in lines where !(filterSpinners && Self.isSpinner(line)) { cont.yield((line, false, state.chunks)) }
-                // Only treat unterminated text as a prompt once output has gone quiet,
-                // so a line split across two reads isn't mistaken for one.
-                let gen = state.generation
-                DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + Self.promptIdle) {
-                    state.lock.lock()
-                    defer { state.lock.unlock() }
-                    guard state.generation == gen, let prompt = buffer.pendingPrompt() else { return }
-                    cont.yield((prompt, true, state.chunks))
-                }
-            }, onEnd: { rest in
-                state.generation += 1
-                state.chunks += 1
-                state.finished = true
-                for line in rest { cont.yield((line, false, state.chunks)) }
-                try? input.fileHandleForWriting.close()
-                cont.finish()
-            })
-            cont.onTermination = { _ in
-                if process.isRunning { process.terminate() }
-            }
-            do {
-                try process.run()
-                state.lock.lock(); state.launched = true; state.lock.unlock()
-            } catch {
-                cont.yield(("Failed to launch: \(error.localizedDescription)", false, 0))
-                cont.finish()
+            cont.onTermination = { _ in Self.stop(process, state) }
+            // The trust check walks Mole's whole library folder and callers are often on
+            // the main thread, so check and launch on a worker.
+            DispatchQueue.global(qos: .userInitiated).async {
+                Self.launch(exe, process, out: out, input: input, state: state, launched: launched,
+                            filterSpinners: filterSpinners, cont: cont)
             }
         }
         let box = IteratorBox(tagged.makeAsyncIterator())
@@ -164,8 +135,71 @@ final class PTYSession: @unchecked Sendable {
             state.deliver(line, prompt: prompt, chunks: chunks)
             return line
         }, onCancel: {
-            if process.isRunning { process.terminate() }
+            Self.stop(process, state)
         })
+    }
+
+    private static func launch(_ exe: String, _ process: Process, out: Pipe, input: Pipe, state: State, launched: Latch<Bool>,
+                               filterSpinners: Bool, cont: AsyncStream<(String, Bool, Int)>.Continuation) {
+        if let refusal = Shell.refusal(exe) {
+            launched.finish(false)
+            cont.yield((refusal, false, 0))
+            cont.finish()
+            return
+        }
+        // Every read, its lines and the counters move together under the state lock,
+        // so the idle check below never sees a half-processed chunk.
+        let buffer = Shell.LineBuffer()
+        Shell.readLines(from: out, into: buffer, lock: state.lock, onLines: { lines in
+            state.generation += 1
+            state.chunks += 1
+            for line in lines where !(filterSpinners && Self.isSpinner(line)) { cont.yield((line, false, state.chunks)) }
+            // Only treat unterminated text as a prompt once output has gone quiet,
+            // so a line split across two reads isn't mistaken for one.
+            let gen = state.generation
+            DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + Self.promptIdle) {
+                state.lock.lock()
+                defer { state.lock.unlock() }
+                guard state.generation == gen, let prompt = buffer.pendingPrompt() else { return }
+                cont.yield((prompt, true, state.chunks))
+            }
+        }, onEnd: { rest in
+            state.generation += 1
+            state.chunks += 1
+            state.finished = true
+            for line in rest { cont.yield((line, false, state.chunks)) }
+            try? input.fileHandleForWriting.close()
+            cont.finish()
+        })
+        // Start under the launch lock so `stop()` either comes first (and nothing starts)
+        // or sees the running process.
+        var failure: String?
+        state.launchLock.lock()
+        let started: Bool
+        if state.stopped {
+            started = false
+        } else {
+            do {
+                try process.run()
+                started = true
+            } catch {
+                started = false
+                failure = "Failed to launch: \(error.localizedDescription)"
+            }
+        }
+        state.launchLock.unlock()
+        launched.finish(started)
+        guard !started else { return }
+        out.fileHandleForReading.readabilityHandler = nil
+        if let failure { cont.yield((failure, false, 0)) }
+        cont.finish()
+    }
+
+    private static func stop(_ process: Process, _ state: State) {
+        state.launchLock.lock()
+        state.stopped = true
+        state.launchLock.unlock()
+        if process.isRunning { process.terminate() }
     }
 
     /// True when `line` is the line most recently delivered by `lines` and it
@@ -212,12 +246,12 @@ final class PTYSession: @unchecked Sendable {
     /// Waits for the command to exit and returns its exit status (`script` passes the
     /// command's own status through); nil when it never started.
     func exitStatus() async -> Int32? {
-        guard state.isLaunched() else { return nil }
+        guard await launched.wait() else { return nil }
         return await exit.wait()
     }
 
     func terminate() {
-        if process.isRunning { process.terminate() }
+        Self.stop(process, state)
     }
 
     /// Drops spinner frames ("⠋ Scanning…", "| Working") that a TTY run redraws constantly.

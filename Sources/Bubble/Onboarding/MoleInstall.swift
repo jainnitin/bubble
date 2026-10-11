@@ -177,7 +177,8 @@ final class MoleInstall {
             return
         }
         path = mo
-        if let why = Shell.trustProblem(executable: mo) {
+        // The check walks Mole's library folder; keep it off the main actor.
+        if let why = await Task.detached(priority: .userInitiated, operation: { Shell.trustProblem(executable: mo) }).value {
             version = nil; installKind = nil
             state = .untrusted(why)
             return

@@ -15,10 +15,11 @@ struct AppInfo: Identifiable, Hashable, Sendable {
     var menuBarOnly: Bool
     /// False until `bytes` has been measured.
     var sized = true
+    /// Info.plist's SUFeedURL (non-empty), read when the app is scanned.
+    var sparkleFeed: String? = nil
     var id: String { path }
 
     var isAppStore: Bool { source == "App Store" }
-    var sparkleFeed: String? { (Bundle(path: path)?.infoDictionary?["SUFeedURL"] as? String).flatMap { $0.isEmpty ? nil : $0 } }
     var isBrew: Bool { source == "Homebrew" && !uninstallName.isEmpty }
     var identity: AppIdentity { AppIdentity(name: name, path: path, bundleId: bundleId) }
 
@@ -137,7 +138,17 @@ final class UninstallModel {
         self.historyDefaults = historyDefaults
     }
 
+    private struct VisibleKey: Equatable {
+        var apps: [AppInfo]; var search: String; var sort: Sort; var ascending: Bool
+    }
+    /// The last filtered and sorted list, reused until one of its inputs changes. Rows
+    /// redraw on every selection, hover and size batch; the list only changes with these.
+    @ObservationIgnored private var visibleCache: (key: VisibleKey, apps: [AppInfo])?
+
     var visible: [AppInfo] {
+        // Reading every input here also keeps the caller observing them.
+        let key = VisibleKey(apps: apps, search: search, sort: sort, ascending: ascending)
+        if let c = visibleCache, c.key == key { return c.apps }
         let filtered = search.isEmpty ? apps : apps.filter { $0.name.localizedCaseInsensitiveContains(search) }
         let sorted: [AppInfo]
         switch sort {
@@ -146,7 +157,9 @@ final class UninstallModel {
         case .lastUsed: sorted = filtered.sorted { ($0.lastUsed ?? .distantPast) < ($1.lastUsed ?? .distantPast) }
         case .installed: sorted = filtered.sorted { ($0.added ?? .distantPast) < ($1.added ?? .distantPast) }
         }
-        return ascending ? sorted : sorted.reversed()
+        let result = ascending ? sorted : sorted.reversed()
+        visibleCache = (key, result)
+        return result
     }
 
     var selectedApps: [AppInfo] { apps.filter { selected.contains($0.id) } }

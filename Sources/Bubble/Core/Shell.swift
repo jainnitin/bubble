@@ -317,30 +317,64 @@ enum Shell {
     /// Cancelling the consuming task terminates the process.
     static func lines(_ exe: String, _ args: [String], input: String? = nil, sandbox: String? = nil) -> AsyncStream<String> {
         AsyncStream { cont in
-            if let why = refusal(exe) {
-                cont.yield(why)
-                cont.finish()
-                return
+            let launch = Launch()
+            cont.onTermination = { _ in launch.stop() }
+            // The trust check walks Mole's whole library folder; callers are often on the
+            // main thread, so check and launch on a worker.
+            DispatchQueue.global(qos: .userInitiated).async {
+                if let why = refusal(exe) {
+                    cont.yield(why)
+                    cont.finish()
+                    return
+                }
+                let run = PrivacyGuard.command(exe, args, profile: sandbox)
+                let p = makeProcess(run.exe, run.args)
+                let pipe = Pipe()
+                p.standardOutput = pipe
+                p.standardError = pipe
+                p.standardInput = inputHandle(input)
+                readLines(from: pipe, onLines: { lines in
+                    for line in lines { cont.yield(line) }
+                }, onEnd: { rest in
+                    for line in rest { cont.yield(line) }
+                    cont.finish()
+                })
+                do {
+                    guard try launch.run(p) else {
+                        pipe.fileHandleForReading.readabilityHandler = nil
+                        return
+                    }
+                } catch {
+                    pipe.fileHandleForReading.readabilityHandler = nil
+                    cont.yield("Failed to launch \(exe): \(error.localizedDescription)")
+                    cont.finish()
+                }
             }
-            let run = PrivacyGuard.command(exe, args, profile: sandbox)
-            let p = makeProcess(run.exe, run.args)
-            let pipe = Pipe()
-            p.standardOutput = pipe
-            p.standardError = pipe
-            p.standardInput = inputHandle(input)
-            readLines(from: pipe, onLines: { lines in
-                for line in lines { cont.yield(line) }
-            }, onEnd: { rest in
-                for line in rest { cont.yield(line) }
-                cont.finish()
-            })
-            cont.onTermination = { _ in
-                if p.isRunning { p.terminate() }
-            }
-            do { try p.run() } catch {
-                cont.yield("Failed to launch \(exe): \(error.localizedDescription)")
-                cont.finish()
-            }
+        }
+    }
+
+    /// Starts a process unless the consumer has already gone away, and stops it when the
+    /// consumer goes away later, whichever thread each happens on.
+    final class Launch: @unchecked Sendable {
+        private let lock = NSLock()
+        private var stopped = false
+        private var process: Process?
+
+        /// Runs `p`; false (and nothing started) when `stop()` came first.
+        func run(_ p: Process) throws -> Bool {
+            lock.lock(); defer { lock.unlock() }
+            guard !stopped else { return false }
+            try p.run()
+            process = p
+            return true
+        }
+
+        func stop() {
+            lock.lock()
+            stopped = true
+            let p = process
+            lock.unlock()
+            if let p, p.isRunning { p.terminate() }
         }
     }
 
