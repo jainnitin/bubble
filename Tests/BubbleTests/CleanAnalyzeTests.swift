@@ -60,7 +60,7 @@ final class AnalyzeNavigatorTests: XCTestCase {
         for p in ["/Users/me", "/Users/me/a", "/Users/me/a/b", "/Users/me/ab"] {
             nav.complete(nav.open(p, title: p, push: false)!, entries: [], insights: [])
         }
-        nav.invalidate(trashed: "/Users/me/a")
+        nav.invalidate(changed: "/Users/me/a")
         XCTAssertEqual(Set(nav.cache.keys), ["/Users/me/ab"])
     }
 
