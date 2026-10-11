@@ -166,8 +166,8 @@ enum Whitelist {
 /// A Mole whitelist file that Bubble changes for one run and then puts back exactly as it
 /// was: Clean's `whitelist` and Optimize's `whitelist_optimize`.
 ///
-/// - The file is never rewritten when it's a symlink (even a dangling one), a folder, or
-///   not readable as UTF-8 text.
+/// - A symlinked file (common with dotfiles) is read and written through the link. The file
+///   is never rewritten when it's a dangling symlink, a folder, or not readable as UTF-8 text.
 /// - The backup (JSON: version, the original or nil for no file, and exactly what Bubble
 ///   wrote) is saved before the file is written; if that write fails the file is put back.
 /// - Restore puts the original back only if the file still holds Bubble's text; otherwise
@@ -207,8 +207,10 @@ struct TemporaryWhitelist {
     /// nil when there's no file; throws `Unreadable` for anything Bubble shouldn't rewrite.
     static func read(_ url: URL) throws -> String? {
         let fm = FileManager.default
-        if (try? fm.destinationOfSymbolicLink(atPath: url.path)) != nil { throw Unreadable(reason: "it's a symlink") }
+        let isLink = (try? fm.destinationOfSymbolicLink(atPath: url.path)) != nil
+        let url = url.resolvingSymlinksInPath()
         var isDir: ObjCBool = false
+        if isLink, !fm.fileExists(atPath: url.path) { throw Unreadable(reason: "it's a symlink to a missing file") }
         guard fm.fileExists(atPath: url.path, isDirectory: &isDir) else { return nil }
         if isDir.boolValue { throw Unreadable(reason: "it's a folder") }
         let data: Data
@@ -224,7 +226,7 @@ struct TemporaryWhitelist {
         // `written` and leaves it alone.
         try JSONEncoder().encode(Backup(version: version, original: original, written: written)).write(to: backup, options: .atomic)
         do {
-            try written.write(to: file, atomically: true, encoding: .utf8)
+            try written.write(to: file.resolvingSymlinksInPath(), atomically: true, encoding: .utf8)
         } catch {
             restoreIfNeeded()
             throw error
@@ -245,7 +247,6 @@ struct TemporaryWhitelist {
     func restoreIfNeeded() {
         let fm = FileManager.default
         guard let data = try? Data(contentsOf: backup) else { return }
-        // Through a symlink, as older Bubbles wrote Clean's list through one.
         let target = file.resolvingSymlinksInPath()
         let current = (try? Data(contentsOf: target)).flatMap { String(data: $0, encoding: .utf8) }
         switch restoreAction(backupData: data, current: current) {

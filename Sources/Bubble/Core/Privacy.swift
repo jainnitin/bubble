@@ -182,8 +182,9 @@ enum PrivacyGuard {
         task.arguments = ["-p", p, "/usr/bin/true"]
         task.standardOutput = FileHandle.nullDevice
         task.standardError = FileHandle.nullDevice
+        let exited = task.exitSignal()
         do { try task.run() } catch { return false }
-        task.waitUntilExit()
+        exited.wait()
         return task.terminationStatus == 0
     }()
 

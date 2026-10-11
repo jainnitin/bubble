@@ -355,13 +355,14 @@ struct AppRemover: Sendable {
                 p.standardOutput = pipe
                 p.standardError = pipe
                 p.standardInput = FileHandle.nullDevice
+                let exited = p.exitSignal()
                 do { try p.run() } catch {
                     cont.resume(returning: ToolResult(status: -1, output: error.localizedDescription))
                     return
                 }
                 DispatchQueue.global().asyncAfter(deadline: .now() + timeout) { if p.isRunning { p.terminate() } }
                 let data = pipe.fileHandleForReading.readDataToEndOfFile()
-                p.waitUntilExit()
+                exited.wait()
                 cont.resume(returning: ToolResult(status: p.terminationStatus, output: Shell.clean(String(decoding: data, as: UTF8.self))))
             }
         }

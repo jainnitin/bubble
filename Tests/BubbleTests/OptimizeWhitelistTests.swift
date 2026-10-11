@@ -180,12 +180,19 @@ final class TemporaryWhitelistTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: l.file.path))
     }
 
-    func testRefusesWhatItShouldNotRewrite() throws {
+    func testFollowsLinksButRefusesWhatItShouldNotRewrite() throws {
         let l = list(version: 1)
         let real = dir.appendingPathComponent("real")
         try "x\n".write(to: real, atomically: true, encoding: .utf8)
         try FileManager.default.createSymbolicLink(at: l.file, withDestinationURL: real)
-        XCTAssertThrowsError(try l.readOriginal()) { XCTAssertEqual($0 as? TemporaryWhitelist.Unreadable, .init(reason: "it's a symlink")) }
+        // A dotfiles-style link is followed: read and written through, the link kept.
+        XCTAssertEqual(try l.readOriginal(), "x\n")
+        try l.write("x\n/a\n", original: "x\n")
+        XCTAssertNotNil(try? FileManager.default.destinationOfSymbolicLink(atPath: l.file.path))
+        XCTAssertEqual(try String(contentsOf: real, encoding: .utf8), "x\n/a\n")
+        l.restoreIfNeeded()
+        XCTAssertNotNil(try? FileManager.default.destinationOfSymbolicLink(atPath: l.file.path))
+        XCTAssertEqual(try String(contentsOf: real, encoding: .utf8), "x\n")
         try FileManager.default.removeItem(at: real)
         XCTAssertThrowsError(try l.readOriginal(), "a dangling symlink isn't 'no file'")
         try FileManager.default.removeItem(at: l.file)

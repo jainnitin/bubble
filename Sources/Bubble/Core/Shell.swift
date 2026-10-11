@@ -285,6 +285,7 @@ enum Shell {
                 p.standardOutput = out
                 p.standardError = FileHandle.nullDevice
                 p.standardInput = inputHandle(input)
+                let exited = p.exitSignal()
                 do { try p.run() } catch {
                     cont.resume(returning: Data())
                     return
@@ -295,7 +296,7 @@ enum Shell {
                     }
                 }
                 let data = out.fileHandleForReading.readDataToEndOfFile()
-                p.waitUntilExit()
+                exited.wait()
                 cont.resume(returning: data)
             }
         }
@@ -430,3 +431,13 @@ enum DetectionOverrides {
     }
 }
 #endif
+
+extension Process {
+    /// Signalled when the process exits. Call before `run()`. `waitUntilExit()` on a worker
+    /// thread can miss the exit and block forever; waiting on this can't.
+    func exitSignal() -> DispatchSemaphore {
+        let exited = DispatchSemaphore(value: 0)
+        terminationHandler = { _ in exited.signal() }
+        return exited
+    }
+}
