@@ -63,16 +63,7 @@ enum Safety {
         return "/" + out.joined(separator: "/")
     }
 
-    // MARK: Uninstall match check
-
-    /// The name Bubble passes to `mo uninstall`: the .app folder name without ".app".
-    /// Mole tries an exact (case-insensitive) match on display name or folder name
-    /// before falling back to a substring match, so this is the most specific term.
-    static func moleUninstallTerm(forAppPath path: String) -> String {
-        var name = (path as NSString).lastPathComponent
-        if name.lowercased().hasSuffix(".app") { name = String(name.dropLast(4)) }
-        return name
-    }
+    // MARK: Uninstall match check (used by PTY's `mo uninstall` prompt policy)
 
     /// Parses Mole's confirmation block:
     ///   ◎ Matched 2 app(s):
@@ -135,23 +126,6 @@ enum Safety {
         if m == e { return nil }
         let list = matched.isEmpty ? "none" : matched.map(normalizeAppName).joined(separator: ", ")
         return "Mole matched different apps than you selected: \(list). Nothing was removed."
-    }
-
-    /// Apps for which passing `term` to `mo uninstall` could pick a different app:
-    /// another installed app whose display name or folder name equals the term
-    /// (case-insensitively), or an empty term (which substring-matches everything).
-    static func ambiguousTerms(selected: [(term: String, path: String)], installed: [(name: String, path: String)]) -> [String] {
-        var out: [String] = []
-        for s in selected {
-            let term = s.term.lowercased()
-            if term.trimmingCharacters(in: .whitespaces).isEmpty { out.append(s.term); continue }
-            let clash = installed.contains { app in
-                guard app.path != s.path else { return false }
-                return normalizeAppName(app.name).lowercased() == term || moleUninstallTerm(forAppPath: app.path).lowercased() == term
-            }
-            if clash { out.append(s.term) }
-        }
-        return out
     }
 
     // MARK: Arguments and links

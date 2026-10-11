@@ -16,9 +16,9 @@
 </p>
 
 Bubble puts a friendly window on top of Mole's `mo` command-line tool: clean caches, uninstall apps
-with their leftovers, run maintenance, map your disk and watch your Mac's vitals. It doesn't
-reimplement any cleaning logic: every cleanup runs `mo`, so Mole's safety rules, protected items
-and history apply exactly as they do in Terminal.
+with their leftovers, run maintenance, map your disk and watch your Mac's vitals. Every cleanup
+runs `mo`, so Mole's safety rules, protected items and history apply exactly as they do in
+Terminal. The one exception is uninstalling apps, which Bubble does natively (see below).
 
 ## Install
 
@@ -34,7 +34,7 @@ Bubble is signed and notarized by Apple and updates itself.
 | Section | What it does |
 |---|---|
 | **Clean** | Runs `mo clean --dry-run`, then reads `~/.config/mole/clean-list.txt` so you can review and untick items before `mo clean`. Unticked items are protected for that one run by temporarily adding them to `~/.config/mole/whitelist` (restored right after, or on the next launch if Bubble quit mid-clean). |
-| **Apps ▸ Uninstall** | `mo uninstall --list`, then `mo uninstall --dry-run NAME` to preview each app's leftovers, then `mo uninstall NAME…`. Bubble confirms Mole's prompt only when the apps Mole matched are exactly the ones you picked. |
+| **Apps ▸ Uninstall** | Native, no `mo`. Lists apps in `/Applications` and `~/Applications` (Apple and protected apps are hidden). Leftovers are matched by exact bundle id, or by exact app name in a few `~/Library` folders, and shown before anything is removed. Open apps are asked to quit. Homebrew casks are removed with `brew uninstall --cask --zap`; everything else goes to the Trash. System files (for example in `/Library/LaunchDaemons`) are moved after one macOS authorization prompt, which accepts Touch ID. Without Full Disk Access, other apps' containers are only checked by exact path, never read or measured. |
 | **Apps ▸ Updates** | Homebrew casks (`brew outdated --cask --greedy`), the App Store lookup API and Sparkle appcasts. Homebrew apps update in place; the rest open the App Store or the download page. |
 | **Apps ▸ Startup** | Launch agents and daemons from `~/Library/LaunchAgents`, `/Library/LaunchAgents` and `/Library/LaunchDaemons`. Your agents can be switched on and off with `launchctl`; daemons are view-only. |
 | **Optimize** | `mo optimize`, with live progress per task. |
@@ -51,7 +51,7 @@ Also:
   version and updates.
 - **Keep Screen On** and **Clean Screen** (a black screen to wipe it), from the Bubble menu.
 
-Uninstall and Optimize run inside a pseudo-terminal so `sudo` works: when Mole needs admin rights,
+Optimize runs inside a pseudo-terminal so `sudo` works: when Mole needs admin rights,
 Bubble shows a password field and types it into sudo's prompt. Every other prompt Mole shows is
 declined with a safe answer and listed as "Skipped".
 

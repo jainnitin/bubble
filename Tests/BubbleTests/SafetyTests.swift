@@ -97,23 +97,6 @@ final class UninstallMatchTests: XCTestCase {
     func testNameWithDoubleSpaceAndPipe() {
         XCTAssertEqual(Safety.matchedRowName("1. My | App  12KB  |  Last: Never", index: 1), "My | App")
     }
-
-    func testMoleTerm() {
-        XCTAssertEqual(Safety.moleUninstallTerm(forAppPath: "/Applications/Claude.app"), "Claude")
-        XCTAssertEqual(Safety.moleUninstallTerm(forAppPath: "/Users/x/Applications/Claude Code URL Handler.app"), "Claude Code URL Handler")
-        XCTAssertEqual(Safety.moleUninstallTerm(forAppPath: "/Applications/Foo.APP"), "Foo")
-    }
-
-    func testAmbiguousTerms() {
-        let installed = [("Claude", "/Applications/Claude.app"), ("Claude Code URL Handler", "/Users/x/Applications/Claude Code URL Handler.app"),
-                         ("Foo", "/Applications/Foo.app"), ("Foo", "/Users/x/Applications/Foo.app"), ("Bar Pro", "/Applications/bar.app")]
-        XCTAssertEqual(Safety.ambiguousTerms(selected: [("Claude", "/Applications/Claude.app")], installed: installed), [])
-        XCTAssertEqual(Safety.ambiguousTerms(selected: [("Foo", "/Applications/Foo.app")], installed: installed), ["Foo"])
-        XCTAssertEqual(Safety.ambiguousTerms(selected: [("", "/Applications/.app")], installed: installed), [""])
-        // Another app's display name equal to our folder name.
-        let more = installed + [("bar", "/Applications/Other.app")]
-        XCTAssertEqual(Safety.ambiguousTerms(selected: [("bar", "/Applications/bar.app")], installed: more), ["bar"])
-    }
 }
 
 final class PromptPolicyTests: XCTestCase {
@@ -159,5 +142,99 @@ final class PromptPolicyTests: XCTestCase {
         XCTAssertEqual(PromptPolicy.detect(arguments: ["uninstall", "Xcode"]), .uninstall(expectedApps: nil))
         XCTAssertEqual(PromptPolicy.detect(arguments: ["clean"]), .strict)
         XCTAssertEqual(PromptResponder.decide(kind: .sudoPassword, policy: .strict, matchOK: true, proceedConfirmed: true), .decline("\n"))
+    }
+}
+
+final class AppLeftoverSafetyTests: XCTestCase {
+    func testBundleIdBoundary() {
+        let chrome = "com.google.Chrome"
+        XCTAssertTrue(AppLeftovers.entryMatches("com.google.Chrome", bundleId: chrome))
+        XCTAssertTrue(AppLeftovers.entryMatches("com.google.Chrome.plist", bundleId: chrome))
+        XCTAssertTrue(AppLeftovers.entryMatches("com.google.Chrome.helper", bundleId: chrome))
+        XCTAssertFalse(AppLeftovers.entryMatches("com.google.ChromeBeta", bundleId: chrome))
+        XCTAssertFalse(AppLeftovers.entryMatches("com.google", bundleId: chrome))
+        XCTAssertFalse(AppLeftovers.entryMatches("xcom.google.Chrome", bundleId: chrome))
+        // Canary's files are claimed by Canary when it's installed.
+        XCTAssertTrue(AppLeftovers.claimedByOther("com.google.Chrome.canary.plist", bundleId: chrome,
+                                                  others: ["com.google.Chrome.canary"], group: false))
+        XCTAssertFalse(AppLeftovers.claimedByOther("com.google.Chrome.plist", bundleId: chrome,
+                                                   others: ["com.google.Chrome.canary"], group: false))
+        // Uninstalling Canary doesn't defer to Chrome's shorter id.
+        XCTAssertFalse(AppLeftovers.claimedByOther("com.google.Chrome.canary", bundleId: "com.google.Chrome.canary",
+                                                   others: [chrome], group: false))
+        // Group containers.
+        XCTAssertTrue(AppLeftovers.groupContainerMatches("EQHXZ8M8AV.com.google.Chrome", bundleId: chrome))
+        XCTAssertTrue(AppLeftovers.groupContainerMatches("group.com.google.Chrome.shared", bundleId: chrome))
+        XCTAssertFalse(AppLeftovers.groupContainerMatches("group.com.google.ChromeX", bundleId: chrome))
+        XCTAssertFalse(AppLeftovers.groupContainerMatches("EQHXZ8M8AV.group.com.google", bundleId: chrome))
+        // Two-part ids only match exactly.
+        XCTAssertTrue(AppLeftovers.entryMatches("com.foo.plist", bundleId: "com.foo"))
+        XCTAssertFalse(AppLeftovers.entryMatches("com.foo.bar", bundleId: "com.foo"))
+    }
+
+    func testMalformedBundleIdsNeverMatch() {
+        for bad in ["", "foo", "com..foo", ".com.foo", "com.foo.", "com.foo/../x", "com.*", "com.foo bar", "com.f?o", "../..", "-com.foo"] {
+            XCTAssertFalse(AppLeftovers.isValidBundleId(bad), bad)
+            XCTAssertFalse(AppLeftovers.entryMatches(bad, bundleId: bad), bad)
+        }
+        XCTAssertTrue(AppLeftovers.isValidBundleId("com.example-1.App2"))
+    }
+
+    func testProtectedApps() {
+        for (id, path) in [("com.apple.Safari", "/Applications/Safari.app"), ("com.apple.dt.Xcode", "/Applications/Xcode.app"),
+                           ("com.jainnitin.Bubble", "/Applications/Bubble.app"), ("com.crowdstrike.falcon.App", "/Applications/Falcon.app"),
+                           ("com.example.x", "/System/Applications/X.app"), ("COM.APPLE.finder", "/Applications/F.app")] {
+            XCTAssertTrue(AppLeftovers.isProtected(bundleId: id, path: path), id)
+        }
+        XCTAssertFalse(AppLeftovers.isProtected(bundleId: "com.google.Chrome", path: "/Applications/Google Chrome.app"))
+    }
+
+    func testGenericNames() {
+        for n in ["Notes", "Code", "App", "abc", "Helper", "..", ".hidden", "a/b", "1.0", "Google"] {
+            XCTAssertFalse(AppLeftovers.isSpecificAppName(n), n)
+        }
+        XCTAssertTrue(AppLeftovers.isSpecificAppName("WhatsApp"))
+    }
+
+    func testLeftoverPathValidation() throws {
+        let mac = try FakeMac()
+        XCTAssertEqual(AppLeftovers.validateLeftover(mac.lib("Caches/com.x.y"), roots: mac.roots), .user)
+        XCTAssertEqual(AppLeftovers.validateLeftover(mac.sys("LaunchDaemons/com.x.y.plist"), roots: mac.roots), .system)
+        let refused = [
+            mac.lib("Caches"), mac.lib("Preferences/ByHost"), mac.roots.library, mac.roots.home, "/", "/System/Library/x",
+            "/usr/bin/x", mac.lib("Caches/a/b"), mac.lib("Caches/../Documents"), mac.lib("Caches/./x"), mac.lib("Caches/.."),
+            mac.lib("Mail/com.x.y"), mac.base + "/home/Documents/x", "Caches/x", mac.lib("Caches//x"), mac.lib("Caches/x/"),
+            "/Library/Caches/com.x.y", NSHomeDirectory() + "/Library/Caches/com.x.y",
+        ]
+        for p in refused { XCTAssertNil(AppLeftovers.validateLeftover(p, roots: mac.roots), p) }
+    }
+
+    func testSymlinkedLeftoverFolderIsRefused() throws {
+        let mac = try FakeMac()
+        // ~/Library/Logs pointing somewhere else: nothing under it is removable.
+        try FileManager.default.removeItem(atPath: mac.lib("Logs"))
+        try FileManager.default.createDirectory(atPath: mac.base + "/elsewhere", withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(atPath: mac.lib("Logs"), withDestinationPath: mac.base + "/elsewhere")
+        try mac.file(mac.base + "/elsewhere/com.x.y")
+        XCTAssertNil(AppLeftovers.validateLeftover(mac.lib("Logs/com.x.y"), roots: mac.roots))
+        // A symlinked entry inside a real folder is fine: it's trashed as a link.
+        try FileManager.default.createSymbolicLink(atPath: mac.lib("Caches/com.x.y"), withDestinationPath: "/System")
+        XCTAssertEqual(AppLeftovers.validateLeftover(mac.lib("Caches/com.x.y"), roots: mac.roots), .user)
+    }
+
+    func testAppBundleValidation() throws {
+        let mac = try FakeMac()
+        let apps = mac.roots.appFolders[0]
+        try FileManager.default.createDirectory(atPath: apps + "/Utilities", withIntermediateDirectories: true)
+        XCTAssertTrue(AppLeftovers.validateAppBundle(apps + "/Foo.app", roots: mac.roots))
+        XCTAssertTrue(AppLeftovers.validateAppBundle(apps + "/Utilities/Foo.app", roots: mac.roots))
+        XCTAssertTrue(AppLeftovers.validateAppBundle(mac.roots.appFolders[1] + "/Foo.app", roots: mac.roots))
+        for bad in [apps, apps + "/Foo", apps + "/.app", apps + "/A/B/Foo.app", apps + "/Bar.app/Foo.app",
+                    apps + "/../Foo.app", "/System/Applications/Foo.app", mac.lib("Caches/Foo.app")] {
+            XCTAssertFalse(AppLeftovers.validateAppBundle(bad, roots: mac.roots), bad)
+        }
+        // A symlinked subfolder of Applications is refused.
+        try FileManager.default.createSymbolicLink(atPath: apps + "/Linked", withDestinationPath: mac.base + "/home")
+        XCTAssertFalse(AppLeftovers.validateAppBundle(apps + "/Linked/Foo.app", roots: mac.roots))
     }
 }
