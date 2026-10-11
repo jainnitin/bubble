@@ -11,7 +11,7 @@
 </p>
 
 <p align="center">
-  <img src="docs/apps.png" width="49%" alt="Apps">
+  <img src="docs/optimize.png" width="49%" alt="Optimize">
   <img src="docs/analyze.png" width="49%" alt="Analyze">
 </p>
 
