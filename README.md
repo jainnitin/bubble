@@ -1,8 +1,33 @@
-# Bubble
+<p align="center">
+  <img src="docs/icon.png" width="128" height="128" alt="Bubble app icon">
+</p>
 
-A small native macOS app for [Mole](https://github.com/tw93/Mole), the open-source Mac cleaner
-command-line tool. Bubble doesn't reimplement any cleaning logic: every cleanup runs `mo`, so
-Mole's safety rules, protected items and history apply exactly as they do in Terminal.
+<h1 align="center">Bubble</h1>
+
+<p align="center">A free, native Mac app for <a href="https://github.com/tw93/Mole">Mole</a>, the open-source Mac cleaner.</p>
+
+<p align="center">
+  <img src="docs/clean.png" alt="Bubble's Clean screen">
+</p>
+
+<p align="center">
+  <img src="docs/optimize.png" width="49%" alt="Optimize">
+  <img src="docs/analyze.png" width="49%" alt="Analyze">
+</p>
+
+Bubble puts a friendly window on top of Mole's `mo` command-line tool: clean caches, uninstall apps
+with their leftovers, run maintenance, map your disk and watch your Mac's vitals. It doesn't
+reimplement any cleaning logic: every cleanup runs `mo`, so Mole's safety rules, protected items
+and history apply exactly as they do in Terminal.
+
+## Install
+
+1. Download `Bubble-X.Y.Z.zip` from the [latest release](https://github.com/jainnitin/bubble/releases/latest),
+   unzip it and drag **Bubble** to Applications.
+2. Open it. If Mole isn't installed yet, Bubble installs it for you.
+3. Give Bubble **Full Disk Access** when it asks, so Mole can scan everything.
+
+Bubble is signed and notarized by Apple and updates itself.
 
 ## Features
 
