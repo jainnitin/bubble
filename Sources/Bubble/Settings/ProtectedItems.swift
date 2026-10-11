@@ -367,7 +367,14 @@ struct ProtectedItemsPane: View {
 
     private func isPattern(_ item: String) -> Bool { item.contains { "*?[".contains($0) } }
 
-    private func exists(_ item: String) -> Bool { !isPattern(item) && FileManager.default.fileExists(atPath: Paths.expandingHome(item)) }
+    private func exists(_ item: String) -> Bool {
+        guard !isPattern(item) else { return false }
+        let path = Paths.expandingHome(item)
+        // Looking inside Desktop, Documents, another app's container… without Full Disk
+        // Access makes macOS ask; a generic icon is fine there.
+        if PrivacyGuard.isGuarding && PrivacyGuard.isLocked(path) && !PrivacyGuard.deniedRoots().contains(path) { return false }
+        return FileManager.default.fileExists(atPath: path)
+    }
 
     @ViewBuilder private func icon(_ item: String) -> some View {
         if exists(item) {

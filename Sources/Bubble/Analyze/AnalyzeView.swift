@@ -4,6 +4,9 @@ import SwiftUI
 struct AnalyzeView: View {
     @State private var model = AnalyzeModel()
     @State private var pendingTrash: DiskEntry?
+    /// A protected folder the user asked to scan; confirmed first because macOS will ask too.
+    @State private var pendingScan: PrivacyGuard.LockedPlace?
+    @State private var access = FullDiskAccess.shared
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
@@ -48,6 +51,19 @@ struct AnalyzeView: View {
             if start, model.current == nil, model.scanning == nil {
                 model.open(nil, title: "Whole Disk", push: false)
             }
+        }
+        .onChange(of: access.isOn) { _, _ in
+            // Access changed in System Settings: what a scan can see changed too.
+            if model.current != nil { rescan() }
+        }
+        .alert("Scan \(pendingScan?.name ?? "")?", isPresented: Binding(get: { pendingScan != nil }, set: { if !$0 { pendingScan = nil } })) {
+            Button("Scan") {
+                if let p = pendingScan { model.scanAnyway(p) }
+                pendingScan = nil
+            }
+            Button("Cancel", role: .cancel) { pendingScan = nil }
+        } message: {
+            Text("macOS will ask once whether Bubble may access your \(pendingScan?.name ?? "") folder. Whatever you choose, it won't ask again. Clean will look there for caches too.")
         }
         .alert("Move “\(pendingTrash?.name ?? "")” to the Trash?", isPresented: Binding(get: { pendingTrash != nil }, set: { if !$0 { pendingTrash = nil } })) {
             Button("Move to Trash", role: .destructive) {
@@ -128,6 +144,16 @@ struct AnalyzeView: View {
                             .frame(maxWidth: .infinity, alignment: .leading).padding(.top, Space.l).padding(.bottom, Space.xs)
                         ForEach(level.insights) { e in folderRow(e, total: nil) }
                     }
+                    let locked = model.guarded ? PrivacyGuard.analyzeLocked(in: level.path) : []
+                    if !locked.isEmpty {
+                        Text("Not scanned").font(.ui(.secondary, .semibold)).foregroundStyle(.white.opacity(0.75))
+                            .frame(maxWidth: .infinity, alignment: .leading).padding(.top, Space.l).padding(.bottom, Space.xs)
+                        ForEach(locked) { p in lockedRow(p) }
+                        Text("macOS keeps these private, so Bubble skips them instead of setting off permission dialogs.")
+                            .font(.ui(.caption)).foregroundStyle(Palette.tertiary)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .frame(maxWidth: .infinity, alignment: .leading).padding(.top, Space.xs)
+                    }
                 }
             }
             Text("Click a folder to open it. Right-click to reveal or move to the Trash.")
@@ -155,6 +181,36 @@ struct AnalyzeView: View {
         .buttonStyle(.quiet)
         .contextMenu { contextMenu(e) }
         .accessibilityHint(e.isDir == false ? "Shows it in Finder" : "Opens the folder")
+    }
+
+    /// A protected folder the scan skipped. Desktop, Documents and Downloads can be scanned
+    /// on their own (macOS asks once); everything else needs Full Disk Access.
+    private func lockedRow(_ p: PrivacyGuard.LockedPlace) -> some View {
+        Menu {
+            if p.path == Shell.home && model.current?.path == nil {
+                Button("Open Home") { model.open(p.path, title: "Home", push: true) }
+            }
+            if let f = p.folder {
+                Button("Scan \(f.rawValue)…") { pendingScan = p }
+            }
+            Button("Allow Full Disk Access…") { FullDiskAccess.shared.openSettings() }
+        } label: {
+            HStack(spacing: Space.m) {
+                Image(systemName: "lock.fill").foregroundStyle(Palette.tertiary).frame(width: 20).accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(p.name).font(.ui(.body, .semibold)).foregroundStyle(Palette.secondary).lineLimit(1)
+                    Text(p.folder != nil ? "macOS asks first" : "Needs Full Disk Access")
+                        .font(.ui(.secondary)).foregroundStyle(Palette.tertiary)
+                }
+                Spacer()
+            }
+            .padding(.vertical, 5).padding(.horizontal, Space.s)
+            .contentShape(Rectangle())
+            .rowHover()
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .accessibilityLabel("\(p.name), not scanned")
     }
 
     private func drill(_ e: DiskEntry) {

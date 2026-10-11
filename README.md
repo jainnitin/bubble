@@ -25,7 +25,8 @@ Terminal. The one exception is uninstalling apps, which Bubble does natively (se
 1. Download `Bubble-X.Y.Z.zip` from the [latest release](https://github.com/jainnitin/bubble/releases/latest),
    unzip it and drag **Bubble** to Applications.
 2. Open it. If Mole isn't installed yet, Bubble installs it for you.
-3. Give Bubble **Full Disk Access** when it asks, so Mole can scan everything.
+3. Optionally give Bubble **Full Disk Access**. Bubble works without it: Clean and Analyze skip
+   the places macOS keeps private (and say so) instead of setting off permission dialogs.
 
 Bubble is signed and notarized by Apple and updates itself.
 
@@ -43,7 +44,7 @@ Bubble is signed and notarized by Apple and updates itself.
 
 Also:
 
-- **First-run setup** installs or updates Mole for you (see Requirements) and asks for Full Disk Access.
+- **First-run setup** installs or updates Mole for you (see Requirements) and offers Full Disk Access as an option.
 - **Checkup** (the Bubble logo at the left of the tab bar) checks Mole, permissions, Touch ID for sudo,
   free disk space and Mole's health score, with a fix for each problem.
 - **Settings**: Full Disk Access status, open at login, menu-bar-only mode, open straight to
@@ -76,8 +77,9 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift build   # debug b
 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test    # unit tests
 ```
 
-Give Bubble **Full Disk Access** (System Settings ▸ Privacy & Security) so Mole can see the Trash,
-Mail and other protected caches.
+Without **Full Disk Access** (System Settings ▸ Privacy & Security), Clean and Analyze run Mole
+under a sandbox profile that skips macOS-protected folders; see Privacy below. Launch a dev build
+with `-simulateNoFullDiskAccess YES` to see that mode on a Mac that has access.
 
 Some tests run real processes in a pseudo-terminal (bash scripts standing in for Mole and sudo).
 The test that needs an installed Mole skips itself without one; `BUBBLE_LIVE_MOLE=1 swift test
@@ -93,7 +95,7 @@ contain (`release.sh` refuses to ship them). Pass them as launch arguments, for 
 | `-simulateNoBrew YES` | Homebrew reported missing (install-script route) |
 | `-simulateMoleVersion 1.40.0` | Report this Mole version (update screen) |
 | `-simulateInstallFailure YES` | The simulated install fails (error screen) |
-| `-simulateNoFullDiskAccess YES` | Full Disk Access reported off (access step) |
+| `-simulateNoFullDiskAccess YES` | Full Disk Access reported off everywhere (setup step, Settings, Checkup, and Clean/Analyze run guarded) |
 | `-lastTab Status`, `-appsSub Updates` | Open on a section |
 | `-autoStart YES` | Clean and Analyze start their read-only scan on launch |
 
@@ -123,13 +125,24 @@ system files during Uninstall) are approved with Touch ID through `sudo` when To
 on, or in the macOS authorization dialog.
 
 **Permissions**
-- *Full Disk Access* (optional) lets Mole see the Trash, Mail and other protected caches. macOS
-  extends it to the tools Bubble runs: `mo`, `brew`, and developer tools such as `npm`, `pip` and
-  `go` that Clean asks to clear their caches.
+- *Full Disk Access* (optional) lets Mole see the Trash, Mail, Desktop, Documents, Downloads and
+  other apps' caches. macOS extends it to the tools Bubble runs: `mo`, `brew`, and developer tools
+  such as `npm`, `pip` and `go` that Clean asks to clear their caches.
+
+  **Without it**, every `mo` that Clean and Analyze start runs under `sandbox-exec` with a profile
+  that refuses the places macOS would otherwise ask about, one dialog each, on Bubble's behalf:
+  Desktop, Documents, Downloads, the Trash, Mail, Messages, Safari, iCloud Drive and
+  `~/Library/CloudStorage`, the Music folder, Photos libraries, removable volumes (`/Volumes`), and
+  the contents of other apps' `Containers`, `Group Containers`, `Application Scripts` and
+  `Daemon Containers`. A refusal from the profile comes before macOS's privacy check, so no
+  dialog appears; Mole sees "Operation not permitted" and moves on. Clean's review and Analyze's
+  sidebar list what was skipped. Desktop, Documents and Downloads can each be turned on in
+  **Settings ▸ General** (or with "Scan…" in Analyze): macOS then asks once and remembers the
+  answer. Granting Full Disk Access later takes effect when you switch back to Bubble.
 - *Administrator approval* (Touch ID or password, in a macOS dialog) for the tasks above.
-- *Automation*: some of Mole's steps use `osascript` (listing running apps through System Events,
-  moving files to the Trash through Finder), so macOS
-  may ask whether Bubble can control Finder or System Events.
+- *Automation*: some of Mole's steps use `osascript` (moving files to the Trash through Finder), so macOS may ask whether Bubble can control Finder or
+  System Events. Clean refuses Mole's System Events "which apps are running" query (Mole falls
+  back to `lsappinfo`), so cleaning never asks.
 - *Open at login*, only if you turn it on in Settings.
 
 **On disk**, Bubble writes only:

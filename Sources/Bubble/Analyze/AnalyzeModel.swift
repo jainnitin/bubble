@@ -92,6 +92,9 @@ struct AnalyzeNavigator {
         return nil
     }
 
+    /// Forgets every cached level (what a scan can see changed).
+    mutating func clearCache() { cache = [:] }
+
     /// Drops cached levels whose sizes include `path` (its ancestors) or lie inside it.
     mutating func invalidate(trashed path: String) {
         cache = cache.filter { key, _ in
@@ -151,16 +154,53 @@ final class AnalyzeModel {
         if let cur = current { open(cur.path, title: cur.title, push: false, force: true) }
     }
 
+    /// True while scans skip macOS-protected folders (no Full Disk Access); the sidebar
+    /// lists those folders as "Not scanned".
+    private(set) var guarded = PrivacyGuard.isGuarding
+
     private func run(_ request: AnalyzeNavigator.Request?) {
         job?.cancel()
         job = nil
         guard let request else { return }
+        let profile = PrivacyGuard.currentProfile()
+        guarded = profile != nil
+        dropStaleMoleCache(profile: profile)
         job = Task {
-            let data = await Shell.moJSON(request.path.map { ["analyze", "--json", $0] } ?? ["analyze", "--json"])
+            let data = await Shell.moJSON(request.path.map { ["analyze", "--json", $0] } ?? ["analyze", "--json"], sandbox: profile)
             guard !Task.isCancelled else { return }
-            let parsed = AnalyzeNavigator.parse(data, overview: request.path == nil)
+            var parsed = AnalyzeNavigator.parse(data, overview: request.path == nil)
+            if profile != nil {
+                // Protected folders come back near-empty; they're listed as "Not scanned" instead.
+                let allowed = PrivacyGuard.allowedFolders
+                parsed.entries.removeAll { PrivacyGuard.isLocked($0.path, allowing: allowed) }
+                parsed.insights.removeAll { PrivacyGuard.isLocked($0.path, allowing: allowed) }
+            }
             nav.complete(request, entries: parsed.entries, insights: parsed.insights)
         }
+    }
+
+    /// `mo analyze` caches sizes in ~/.cache/mole/analyzer. Sizes measured under one guard
+    /// (say, without Full Disk Access) are wrong under another, so the cache is dropped
+    /// whenever what a scan may see changes. Mole rebuilds it on the next scan.
+    private func dropStaleMoleCache(profile: String?) {
+        let key = "analyzeScanProfile"
+        let now = profile ?? "none"
+        guard UserDefaults.standard.string(forKey: key) != now else { return }
+        let hadValue = UserDefaults.standard.string(forKey: key) != nil
+        UserDefaults.standard.set(now, forKey: key)
+        nav.clearCache()
+        // First run without a guard: a cache from Terminal runs is as good as any.
+        guard hadValue || profile != nil else { return }
+        let dir = URL(fileURLWithPath: Shell.home).appendingPathComponent(".cache/mole/analyzer")
+        try? FileManager.default.removeItem(at: dir)
+    }
+
+    /// Scans a protected user folder (Desktop, Documents, Downloads) after the user chose
+    /// to: macOS asks once, and remembers the answer, so it's allowed from then on.
+    func scanAnyway(_ place: PrivacyGuard.LockedPlace) {
+        guard let folder = place.folder else { return }
+        PrivacyGuard.allowedFolders.insert(folder)
+        open(place.path, title: place.name, push: true, force: true)
     }
 
     func trash(_ entry: DiskEntry) {
