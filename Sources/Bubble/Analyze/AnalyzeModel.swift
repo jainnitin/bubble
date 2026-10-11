@@ -95,8 +95,9 @@ struct AnalyzeNavigator {
     /// Forgets every cached level (what a scan can see changed).
     mutating func clearCache() { cache = [:] }
 
-    /// Drops cached levels whose sizes include `path` (its ancestors) or lie inside it.
-    mutating func invalidate(trashed path: String) {
+    /// Drops cached levels whose sizes include `path` (its ancestors) or lie inside it:
+    /// after a trash there, or a refresh that may have found changes anywhere below it.
+    mutating func invalidate(changed path: String) {
         cache = cache.filter { key, _ in
             key != "/" && !path.hasPrefix(key + "/") && key != path && !key.hasPrefix(path + "/")
         }
@@ -150,15 +151,23 @@ final class AnalyzeModel {
         run(nav.pop(to: index))
     }
 
+    /// Refresh: rescans the current folder from the disk itself, not from either cache.
+    /// Something may have changed anywhere below it (a file deleted in Finder, say), so
+    /// Bubble's levels above and below it are dropped too, and so are the Mole cache
+    /// entries that would otherwise hand back the old sizes (see `MoleAnalyzerCache`).
     func rescan() {
-        if let cur = current { open(cur.path, title: cur.title, push: false, force: true) }
+        guard let cur = current else { return }
+        if let path = cur.path { nav.invalidate(changed: path) } else { nav.clearCache() }
+        run(nav.open(cur.path, title: cur.title, push: false, force: true), fresh: true)
     }
 
     /// True while scans skip macOS-protected folders (no Full Disk Access); the sidebar
     /// lists those folders as "Not scanned".
     private(set) var guarded = PrivacyGuard.isGuarding
 
-    private func run(_ request: AnalyzeNavigator.Request?) {
+    /// Runs `request`'s scan. `fresh` first drops Mole's cache entries for the folder
+    /// (off the main thread: that walks the folder's subfolders).
+    private func run(_ request: AnalyzeNavigator.Request?, fresh: Bool = false) {
         job?.cancel()
         job = nil
         guard let request else { return }
@@ -166,6 +175,16 @@ final class AnalyzeModel {
         guarded = profile != nil
         dropStaleMoleCache(profile: profile)
         job = Task {
+            if fresh {
+                let allowed = PrivacyGuard.allowedFolders
+                let guarded = profile != nil
+                await Task.detached(priority: .userInitiated) {
+                    // Never list a protected folder from Bubble itself: macOS would prompt,
+                    // and a guarded scan can't see inside it anyway.
+                    MoleAnalyzerCache.invalidate(refreshing: request.path, skip: { guarded && PrivacyGuard.isLocked($0, allowing: allowed) })
+                }.value
+                guard !Task.isCancelled else { return }
+            }
             let data = await Shell.moJSON(request.path.map { ["analyze", "--json", $0] } ?? ["analyze", "--json"], sandbox: profile)
             guard !Task.isCancelled else { return }
             var parsed = AnalyzeNavigator.parse(data, overview: request.path == nil)
@@ -191,8 +210,7 @@ final class AnalyzeModel {
         nav.clearCache()
         // First run without a guard: a cache from Terminal runs is as good as any.
         guard hadValue || profile != nil else { return }
-        let dir = URL(fileURLWithPath: Shell.home).appendingPathComponent(".cache/mole/analyzer")
-        try? FileManager.default.removeItem(at: dir)
+        try? FileManager.default.removeItem(at: MoleAnalyzerCache.directory())
     }
 
     /// Scans a protected user folder (Desktop, Documents, Downloads) after the user chose
@@ -210,8 +228,11 @@ final class AnalyzeModel {
             _ = Dialogs.run(NSAlert(error: error))
             return
         }
-        // Sizes of every ancestor changed; drop cached levels and rescan the current one.
-        nav.invalidate(trashed: entry.path)
-        rescan()
+        // Sizes of every ancestor changed; drop their cached levels (Bubble's and Mole's)
+        // and rescan the current one. Mole's entries for untouched siblings stay valid,
+        // so this is quicker than a full Refresh.
+        nav.invalidate(changed: entry.path)
+        MoleAnalyzerCache.invalidate(trashed: entry.path)
+        if let cur = current { open(cur.path, title: cur.title, push: false, force: true) }
     }
 }
