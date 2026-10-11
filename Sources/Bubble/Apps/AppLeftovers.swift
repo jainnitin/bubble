@@ -541,7 +541,8 @@ enum AppScanner {
                 lastUsed: md.flatMap { MDItemCopyAttribute($0, kMDItemLastUsedDate) as? Date },
                 added: md.flatMap { MDItemCopyAttribute($0, kMDItemDateAdded) as? Date },
                 menuBarOnly: (info?["LSUIElement"] as? Bool) == true || (info?["LSUIElement"] as? String) == "1",
-                sized: sized
+                sized: sized,
+                sparkleFeed: (info?["SUFeedURL"] as? String).flatMap { $0.isEmpty ? nil : $0 }
             ))
         }
         return Result(apps: apps, identities: identities, unresolvedCasks: casks.unresolved)

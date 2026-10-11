@@ -129,11 +129,28 @@ struct AppsView: View {
 
 // MARK: - Shared pieces
 
+/// Finder icons by path. `NSWorkspace.icon(forFile:)` reads the bundle each call, and
+/// list rows ask on every redraw (several times a second while sizes come in).
+enum FileIcons {
+    private static let cache: NSCache<NSString, NSImage> = {
+        let c = NSCache<NSString, NSImage>()
+        c.countLimit = 1000
+        return c
+    }()
+
+    @MainActor static func icon(forFile path: String) -> NSImage {
+        if let hit = cache.object(forKey: path as NSString) { return hit }
+        let image = NSWorkspace.shared.icon(forFile: path)
+        cache.setObject(image, forKey: path as NSString)
+        return image
+    }
+}
+
 struct AppIcon: View {
     let path: String
     var size: CGFloat = 38
     var body: some View {
-        Image(nsImage: NSWorkspace.shared.icon(forFile: path))
+        Image(nsImage: FileIcons.icon(forFile: path))
             .resizable()
             .frame(width: size, height: size)
             .accessibilityHidden(true)

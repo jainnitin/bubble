@@ -156,6 +156,28 @@ final class ProtectedItemsModel {
 
     var problems: [String] { items.filter { Self.problem($0) != nil } }
 
+    nonisolated static func isPattern(_ item: String) -> Bool { item.contains { "*?[".contains($0) } }
+
+    /// The items that name an existing file or folder Bubble may look at (for row icons and
+    /// Show in Finder). Touches the disk, so the pane calls it off the main thread.
+    nonisolated static func existingItems(_ items: [String]) -> Set<String> {
+        let guarding = PrivacyGuard.isGuarding
+        let denied = guarding ? PrivacyGuard.deniedRoots() : []
+        return existingItems(items, isLocked: { guarding && PrivacyGuard.isLocked($0) && !denied.contains($0) },
+                             fileExists: { FileManager.default.fileExists(atPath: $0) })
+    }
+
+    nonisolated static func existingItems(_ items: [String], isLocked: (String) -> Bool,
+                                          fileExists: (String) -> Bool) -> Set<String> {
+        Set(items.filter { item in
+            guard !isPattern(item) else { return false }
+            let path = Paths.expandingHome(item)
+            // Looking inside Desktop, Documents, another app's container… without Full Disk
+            // Access makes macOS ask; a generic icon is fine there.
+            return !isLocked(path) && fileExists(path)
+        })
+    }
+
     /// Writes the list. Refuses while a clean is running (Bubble's temporary list is in
     /// place then) and while any line would be ignored by Mole.
     func save() {
@@ -194,6 +216,9 @@ struct ProtectedItemsPane: View {
     @State private var selection: Set<String> = []
     @State private var dropTargeted = false
     @FocusState private var searchFocused: Bool
+    /// Items that name something on disk Bubble may look at (see `existingItems`).
+    @State private var onDisk: Set<String> = []
+    @State private var probeGeneration = 0
 
     private var shown: [String] {
         let q = query.trimmingCharacters(in: .whitespaces)
@@ -222,9 +247,20 @@ struct ProtectedItemsPane: View {
                 footer
             }
         }
-        .onAppear { model.reloadIfChanged() }
-        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)) { _ in model.reloadIfChanged() }
+        .onAppear { model.reloadIfChanged(); probeGeneration += 1 }
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)) { _ in
+            model.reloadIfChanged()
+            probeGeneration += 1
+        }
+        // Rows look at the disk (existence, privacy) once per list change or reappearance,
+        // off the main thread, rather than on every render.
+        .task(id: ProbeKey(items: model.items, generation: probeGeneration)) {
+            let items = model.items
+            onDisk = await Task.detached(priority: .userInitiated) { ProtectedItemsModel.existingItems(items) }.value
+        }
     }
+
+    private struct ProbeKey: Equatable { var items: [String]; var generation: Int }
 
     private var toolbar: some View {
         HStack(spacing: Space.s) {
@@ -365,20 +401,13 @@ struct ProtectedItemsPane: View {
         return (String(d[d.index(after: slash)...]), String(d[..<slash]))
     }
 
-    private func isPattern(_ item: String) -> Bool { item.contains { "*?[".contains($0) } }
+    private func isPattern(_ item: String) -> Bool { ProtectedItemsModel.isPattern(item) }
 
-    private func exists(_ item: String) -> Bool {
-        guard !isPattern(item) else { return false }
-        let path = Paths.expandingHome(item)
-        // Looking inside Desktop, Documents, another app's container… without Full Disk
-        // Access makes macOS ask; a generic icon is fine there.
-        if PrivacyGuard.isGuarding && PrivacyGuard.isLocked(path) && !PrivacyGuard.deniedRoots().contains(path) { return false }
-        return FileManager.default.fileExists(atPath: path)
-    }
+    private func exists(_ item: String) -> Bool { onDisk.contains(item) }
 
     @ViewBuilder private func icon(_ item: String) -> some View {
         if exists(item) {
-            Image(nsImage: NSWorkspace.shared.icon(forFile: Paths.expandingHome(item)))
+            Image(nsImage: FileIcons.icon(forFile: Paths.expandingHome(item)))
                 .resizable().frame(width: 22, height: 22).accessibilityHidden(true)
         } else {
             Image(systemName: item == "FINDER_METADATA" ? "doc.badge.gearshape" : isPattern(item) ? "asterisk" : "questionmark.folder")

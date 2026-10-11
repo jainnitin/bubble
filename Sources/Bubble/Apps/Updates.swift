@@ -266,7 +266,8 @@ struct UpdatesList: View {
         let pending = model.updates.filter { $0.hasUpdate && !model.isIgnored($0) }
         let inApp = pending.filter { $0.app.isBrew }
         let outside = pending.filter { !$0.app.isBrew }
-        let rest = model.updates.filter { !pending.map(\.id).contains($0.id) }
+        let pendingIds = Set(pending.map(\.id))
+        let rest = model.updates.filter { !pendingIds.contains($0.id) }
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 4) {
                 Label("Checking contacts Apple (itunes.apple.com, with App Store apps' bundle IDs), each Sparkle app's update feed, and Homebrew.",

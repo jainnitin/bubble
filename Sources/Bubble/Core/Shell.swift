@@ -315,13 +315,12 @@ enum Shell {
 
     /// Streams stdout+stderr line by line, with ANSI codes removed.
     /// Cancelling the consuming task terminates the process.
-    ///
-    /// The trust check (which walks Mole's library folder) and the launch happen on a
-    /// background queue, never on the caller's thread, which is usually the main one.
     static func lines(_ exe: String, _ args: [String], input: String? = nil, sandbox: String? = nil) -> AsyncStream<String> {
         AsyncStream { cont in
-            let gate = LaunchGate()
-            cont.onTermination = { _ in gate.cancel() }
+            let launch = Launch()
+            cont.onTermination = { _ in launch.stop() }
+            // The trust check walks Mole's whole library folder; callers are often on the
+            // main thread, so check and launch on a worker.
             DispatchQueue.global(qos: .userInitiated).async {
                 if let why = refusal(exe) {
                     cont.yield(why)
@@ -341,11 +340,12 @@ enum Shell {
                     cont.finish()
                 })
                 do {
-                    if try !gate.launch(p) {
+                    guard try launch.run(p) else {
                         pipe.fileHandleForReading.readabilityHandler = nil
-                        cont.finish()
+                        return
                     }
                 } catch {
+                    pipe.fileHandleForReading.readabilityHandler = nil
                     cont.yield("Failed to launch \(exe): \(error.localizedDescription)")
                     cont.finish()
                 }
@@ -353,26 +353,28 @@ enum Shell {
         }
     }
 
-    /// Starts a process unless its stream was already cancelled, and stops it when the
-    /// stream is cancelled later, with no gap between the two where it could be missed.
-    private final class LaunchGate: @unchecked Sendable {
+    /// Starts a process unless the consumer has already gone away, and stops it when the
+    /// consumer goes away later, whichever thread each happens on.
+    final class Launch: @unchecked Sendable {
         private let lock = NSLock()
-        private var cancelled = false
+        private var stopped = false
         private var process: Process?
 
-        /// False when the stream was cancelled first and nothing was started.
-        func launch(_ p: Process) throws -> Bool {
+        /// Runs `p`; false (and nothing started) when `stop()` came first.
+        func run(_ p: Process) throws -> Bool {
             lock.lock(); defer { lock.unlock() }
-            guard !cancelled else { return false }
+            guard !stopped else { return false }
             try p.run()
             process = p
             return true
         }
 
-        func cancel() {
-            lock.lock(); defer { lock.unlock() }
-            cancelled = true
-            if let process, process.isRunning { process.terminate() }
+        func stop() {
+            lock.lock()
+            stopped = true
+            let p = process
+            lock.unlock()
+            if let p, p.isRunning { p.terminate() }
         }
     }
 

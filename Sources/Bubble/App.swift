@@ -88,6 +88,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // unless the user chose to live in the menu bar only.
         NSApp.setActivationPolicy(UserDefaults.standard.bool(forKey: "menuBarOnly") ? .accessory : .regular)
         NSApp.activate(ignoringOtherApps: true)
+        // Launches sandbox-exec once and waits for it; do that now, off the main thread,
+        // so the first Settings or Optimize render doesn't.
+        DispatchQueue.global(qos: .userInitiated).async { _ = PrivacyGuard.sandboxWorks }
         // If a previous selective clean was interrupted, put the user's whitelist back.
         Whitelist.restoreIfNeeded()
         OptimizeWhitelist.restoreStale()
