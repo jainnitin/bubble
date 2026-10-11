@@ -121,21 +121,72 @@ struct SettingsView: View {
 // MARK: - Building blocks
 
 /// Lets the ink background run under a transparent title bar, so the Settings window
-/// doesn't wear a grey system strip above the dark panes.
+/// doesn't wear a grey system strip above the dark panes. Also centres the window over
+/// Bubble's main window each time it opens, like every other dialog.
 private struct InkTitlebar: NSViewRepresentable {
     func makeNSView(context: Context) -> NSView {
         let v = NSView()
-        DispatchQueue.main.async { style(v.window) }
+        DispatchQueue.main.async { style(v.window, context.coordinator) }
         return v
     }
-    func updateNSView(_ v: NSView, context: Context) { DispatchQueue.main.async { style(v.window) } }
+    func updateNSView(_ v: NSView, context: Context) { DispatchQueue.main.async { style(v.window, context.coordinator) } }
 
-    private func style(_ w: NSWindow?) {
+    func makeCoordinator() -> Centering { Centering() }
+
+    private func style(_ w: NSWindow?, _ centering: Centering) {
         guard let w else { return }
         w.titlebarAppearsTransparent = true
         w.titleVisibility = .hidden
         w.styleMask.insert(.fullSizeContentView)
         w.backgroundColor = NSColor(Palette.abyss)
+        centering.attach(to: w)
+    }
+
+    /// SwiftUI reuses the Settings window across opens, so centre on every open, not once.
+    @MainActor
+    final class Centering {
+        private weak var window: NSWindow?
+        private var observers: [NSObjectProtocol] = []
+        private var needsCentering = true
+
+        func attach(to w: NSWindow) {
+            if window !== w {
+                window = w
+                observers.forEach(NotificationCenter.default.removeObserver)
+                let nc = NotificationCenter.default
+                observers = [
+                    nc.addObserver(forName: NSWindow.willCloseNotification, object: w, queue: .main) { [weak self] _ in
+                        MainActor.assumeIsolated { self?.needsCentering = true }
+                    },
+                    // A reopened Settings window becomes key without SwiftUI updating this view.
+                    nc.addObserver(forName: NSWindow.didBecomeKeyNotification, object: w, queue: .main) { [weak self] _ in
+                        MainActor.assumeIsolated { self?.centerIfNeeded() }
+                    },
+                ]
+                needsCentering = true
+            }
+            centerIfNeeded()
+        }
+
+        private func centerIfNeeded() {
+            guard needsCentering, let w = window else { return }
+            needsCentering = false
+            center(w)
+        }
+
+        private func center(_ w: NSWindow) {
+            let main = NSApp.windows.first { $0 !== w && $0.isVisible && $0.canBecomeMain && $0.identifier?.rawValue == "main" }
+                ?? NSApp.windows.first { $0 !== w && $0.isVisible && $0.canBecomeMain }
+            guard let main, let screen = main.screen ?? w.screen else { w.center(); return }
+            let size = w.frame.size
+            var origin = NSPoint(x: main.frame.midX - size.width / 2, y: main.frame.midY - size.height / 2)
+            let bounds = screen.visibleFrame
+            origin.x = min(max(origin.x, bounds.minX), bounds.maxX - size.width)
+            origin.y = min(max(origin.y, bounds.minY), bounds.maxY - size.height)
+            w.setFrameOrigin(origin)
+        }
+
+        deinit { observers.forEach(NotificationCenter.default.removeObserver) }
     }
 }
 
