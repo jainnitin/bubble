@@ -417,13 +417,26 @@ struct UninstallList: View {
         }
         .motion(model.selected.isEmpty && !model.removing)
         .motion(model.summary)
-        .confirmationDialog("Remove \(model.selectedApps.count) app\(model.selectedApps.count == 1 ? "" : "s") and their data?", isPresented: $confirm) {
-            Button("Remove", role: .destructive) {
+        // Everything goes to the Trash, so removal needs no confirmation, except for
+        // Homebrew apps: brew --zap deletes their files for good.
+        .confirmationDialog("Permanently delete \(brewNames)?", isPresented: $confirm) {
+            Button("Delete", role: .destructive) {
                 Task { await model.removeSelected() }
             }
         } message: {
-            Text(model.selectedApps.map(\.name).joined(separator: ", ")
-                 + "\n\nThe apps and their leftovers go to the Trash. Homebrew apps are removed with brew uninstall --zap. Open apps are asked to quit first. macOS asks for your password or Touch ID if system files are involved.")
+            Text("Homebrew removes these apps and their data with brew uninstall --zap, which skips the Trash. Other selected apps go to the Trash.")
+        }
+    }
+
+    private var brewNames: String {
+        ListFormatter.localizedString(byJoining: model.selectedApps.filter(\.isBrew).map(\.name))
+    }
+
+    private func remove() {
+        if model.selectedApps.contains(where: \.isBrew) {
+            confirm = true
+        } else {
+            Task { await model.removeSelected() }
         }
     }
 
@@ -619,7 +632,7 @@ struct UninstallList: View {
                     .contentTransition(.numericText())
                 LinkButton(title: "Clear selection", color: Palette.accent) { model.selected = [] }
                 Spacer()
-                PillButton(title: "Remove \(apps.count) app\(apps.count == 1 ? "" : "s")", width: 240) { confirm = true }
+                PillButton(title: "Remove \(apps.count) app\(apps.count == 1 ? "" : "s")", width: 240) { remove() }
             }
         }
         .padding(.horizontal, Space.gutter).padding(.vertical, Space.m)
