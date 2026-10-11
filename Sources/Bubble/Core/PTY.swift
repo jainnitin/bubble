@@ -8,26 +8,27 @@ struct PromptTicket: Equatable {
     let chunks: Int
 }
 
-/// Runs a command inside a pseudo-terminal (via /usr/bin/script) so that Mole
-/// behaves exactly as in Terminal: Mole's own confirmations work, and a `sudo` prompt
-/// shows up as a prompt Bubble can answer or decline. The caller answers with `send`.
+/// Runs a command inside a pseudo-terminal (via /usr/bin/script) so that it behaves
+/// exactly as in Terminal: Mole's own confirmations work, and a `sudo` prompt shows up
+/// as a prompt the caller can recognize and decline. The caller replies with `send`;
+/// Bubble never types a password.
 ///
-/// Text that ends without a newline and then sits idle for `promptIdle` seconds
-/// is yielded as a *pending prompt*. `isPendingPrompt(_:)` tells whether the line
-/// the consumer just received arrived that way, so a complete output line that
-/// merely ends in "password:" is never mistaken for sudo asking.
+/// Output is split at "\n" and "\r" into trimmed, non-blank lines. Text that ends
+/// without a newline and then sits idle for `promptIdle` seconds is yielded as a
+/// *pending prompt*. `isPendingPrompt(_:)` tells whether the line the consumer just
+/// received arrived that way, so a complete output line that merely ends in
+/// "password:" is never mistaken for sudo asking.
 ///
-/// sudo's prompt is a per-session random string (`SUDO_PROMPT`; Mole runs `sudo -v`
-/// without `-p`, so sudo uses it), so only sudo itself can ask for the password.
+/// sudo's prompt is a per-session random string (`SUDO_PROMPT`, which sudo uses
+/// unless it's called with `-p`), so a look-alike prompt can't pass for sudo's.
 final class PTYSession: @unchecked Sendable {
     let lines: AsyncStream<String>
-    /// The command-line arguments passed to the executable (e.g. ["optimize"]).
-    let arguments: [String]
     /// The exact prompt sudo prints in this session.
     let sudoPrompt: String
     private let process: Process
     private let input = Pipe()
     private let state = State()
+    private let exit = Exit()
     static let promptIdle: TimeInterval = 0.15
     /// Ctrl-D. Typed at sudo's password prompt it ends input, so sudo gives up at once
     /// ("no password was provided") instead of counting an empty password as a failed
@@ -53,6 +54,36 @@ final class PTYSession: @unchecked Sendable {
         }
     }
 
+    /// The exit status, filled in by the process's termination handler. `waitUntilExit` on
+    /// a worker thread can miss the exit and wait forever, so waiters park here instead.
+    private final class Exit: @unchecked Sendable {
+        private let lock = NSLock()
+        private var status: Int32?
+        private var waiters: [CheckedContinuation<Int32, Never>] = []
+
+        func finish(_ s: Int32) {
+            lock.lock()
+            status = s
+            let ready = waiters
+            waiters = []
+            lock.unlock()
+            ready.forEach { $0.resume(returning: s) }
+        }
+
+        func wait() async -> Int32 {
+            await withCheckedContinuation { cont in
+                lock.lock()
+                if let status {
+                    lock.unlock()
+                    cont.resume(returning: status)
+                } else {
+                    waiters.append(cont)
+                    lock.unlock()
+                }
+            }
+        }
+    }
+
     /// Lets the unfolding stream below share one iterator.
     private final class IteratorBox: @unchecked Sendable {
         var iterator: AsyncStream<(String, Bool, Int)>.Iterator
@@ -65,9 +96,12 @@ final class PTYSession: @unchecked Sendable {
         return "Bubble sudo password " + bytes.map { String(format: "%02x", $0) }.joined() + ":"
     }
 
-    /// - Parameter environment: extra variables for the child, on top of `Shell.childEnvironment`.
-    init(_ exe: String, _ args: [String], environment: [String: String] = [:]) {
-        arguments = args
+    /// - Parameters:
+    ///   - environment: extra variables for the child, on top of `Shell.childEnvironment`.
+    ///   - filterSpinners: drop lines that start with a spinner frame (a braille dot
+    ///     pattern, "|", "/" or "\"), as Mole redraws them constantly. Pass false for
+    ///     output that isn't Mole's, where such lines are real (e.g. "/bin/sh: …").
+    init(_ exe: String, _ args: [String], environment: [String: String] = [:], filterSpinners: Bool = true) {
         let sudoPrompt = Self.makeSudoPrompt()
         self.sudoPrompt = sudoPrompt
         let input = self.input
@@ -80,6 +114,8 @@ final class PTYSession: @unchecked Sendable {
         process.standardOutput = out
         process.standardError = out
         process.standardInput = input
+        let exit = self.exit
+        process.terminationHandler = { exit.finish($0.terminationStatus) }
 
         let tagged = AsyncStream<(String, Bool, Int)> { cont in
             if let refusal {
@@ -93,7 +129,7 @@ final class PTYSession: @unchecked Sendable {
             Shell.readLines(from: out, into: buffer, lock: state.lock, onLines: { lines in
                 state.generation += 1
                 state.chunks += 1
-                for line in lines where !Self.isSpinner(line) { cont.yield((line, false, state.chunks)) }
+                for line in lines where !(filterSpinners && Self.isSpinner(line)) { cont.yield((line, false, state.chunks)) }
                 // Only treat unterminated text as a prompt once output has gone quiet,
                 // so a line split across two reads isn't mistaken for one.
                 let gen = state.generation
@@ -177,13 +213,7 @@ final class PTYSession: @unchecked Sendable {
     /// command's own status through); nil when it never started.
     func exitStatus() async -> Int32? {
         guard state.isLaunched() else { return nil }
-        let process = self.process
-        return await withCheckedContinuation { cont in
-            DispatchQueue.global(qos: .userInitiated).async {
-                process.waitUntilExit()
-                cont.resume(returning: process.terminationStatus)
-            }
-        }
+        return await exit.wait()
     }
 
     func terminate() {
@@ -212,20 +242,6 @@ enum PromptKind: Equatable {
     case unknown
 }
 
-/// Which prompts a run may answer on the user's behalf. Bubble never types a password.
-enum PromptPolicy: Equatable {
-    /// `mo optimize`: runs without admin rights. sudo's password prompt is ended with
-    /// Ctrl-D straight away (no dialog), so Mole skips its admin tasks; Bubble runs its
-    /// own versions afterwards through `Admin.run`. Every other prompt is declined.
-    case optimize
-    /// Answer nothing; decline everything.
-    case strict
-
-    static func detect(arguments: [String]) -> PromptPolicy {
-        arguments.first == "optimize" ? .optimize : .strict
-    }
-}
-
 /// What to type in response to a prompt.
 enum PromptReply: Equatable {
     /// Decline sudo's prompt without asking anyone: type Ctrl-D so sudo gives up after one
@@ -238,22 +254,17 @@ enum PromptReply: Equatable {
     case declineUnknown
 }
 
-/// Declines Mole's interactive prompts during a PTY run. sudo's prompt is ended without
-/// asking anyone (Optimize) or declined; every other prompt gets a safe default and is
-/// recorded in `skippedPrompts` so the UI can show "Skipped: <prompt>".
+/// Declines Mole's interactive prompts during a PTY run (`mo optimize`), which runs without
+/// admin rights. Bubble never types a password: sudo's own prompt is ended with Ctrl-D
+/// straight away (no dialog), so Mole skips its admin tasks and Bubble runs its own versions
+/// afterwards through `Admin.run`. Every other prompt gets a safe default and is recorded
+/// in `skippedPrompts` so the UI can show "Skipped: <prompt>".
 @MainActor
 final class PromptResponder {
-    private let policy: PromptPolicy?
     /// Prompts that were declined with a safe default, in order.
     private(set) var skippedPrompts: [String] = []
     /// True once sudo's prompt was declined because this run doesn't use admin rights.
     private(set) var adminSkipped = false
-
-    /// - Parameter policy: nil picks the policy from the session's command
-    ///   (`optimize` → skip admin, anything else → strict).
-    init(policy: PromptPolicy? = nil) {
-        self.policy = policy
-    }
 
     /// Returns true when `line` was a prompt and has been declined.
     ///
@@ -262,9 +273,8 @@ final class PromptResponder {
     /// land in the next one.
     func handle(_ line: String, _ session: PTYSession) -> Bool {
         guard session.isPendingPrompt(line), let ticket = session.ticket(for: line) else { return false }
-        let policy = self.policy ?? PromptPolicy.detect(arguments: session.arguments)
         let kind = Self.classify(line, sudoPrompt: session.sudoPrompt)
-        switch Self.decide(kind: kind, policy: policy) {
+        switch Self.decide(kind: kind) {
         case .skipAdmin:
             adminSkipped = true
             session.send(PTYSession.endOfInput, ifCurrent: ticket)
@@ -285,18 +295,13 @@ final class PromptResponder {
 
     // MARK: Policy
 
-    nonisolated static func decide(kind: PromptKind, policy: PromptPolicy) -> PromptReply {
-        switch (kind, policy) {
-        case (.sudoPassword, .optimize):
-            return .skipAdmin
-        case (.sudoPassword, .strict), (.otherPassword, _):
-            return .decline("\n")
-        case (.yesNo, _):
-            return .decline("n\n")
-        case (.keyChoice(let cancel), _):
-            return .decline(cancel)
-        case (.unknown, _):
-            return .declineUnknown
+    nonisolated static func decide(kind: PromptKind) -> PromptReply {
+        switch kind {
+        case .sudoPassword: .skipAdmin
+        case .otherPassword: .decline("\n")
+        case .yesNo: .decline("n\n")
+        case .keyChoice(let cancel): .decline(cancel)
+        case .unknown: .declineUnknown
         }
     }
 

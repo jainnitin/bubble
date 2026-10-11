@@ -285,10 +285,7 @@ struct LogoButton: View {
     @State private var hovering = false
 
     var body: some View {
-        Button {
-            let open = openSettings
-            showAppMenu(under: anchor.view) { open() }
-        } label: {
+        Button(action: showMenu) {
             BubbleView()
                 .frame(width: 22, height: 22)
                 .frame(width: 30, height: 30)
@@ -301,6 +298,37 @@ struct LogoButton: View {
         .animation(.easeOut(duration: 0.12), value: hovering)
         .help("Bubble menu")
         .accessibilityLabel("Bubble menu")
+    }
+
+    /// The app menu: Settings, Checkup, Keep Screen On, Clean Screen, About, Updates.
+    /// Opens just under the logo.
+    private func showMenu() {
+        guard let view = anchor.view, view.window != nil else { return }
+        let openSettings = self.openSettings
+        let menu = NSMenu()
+        menu.addItem(ClosureMenuItem("Settings…", symbol: "gearshape") { openSettings() })
+        menu.addItem(ClosureMenuItem("Run Checkup", symbol: "stethoscope") {
+            NotificationCenter.default.post(name: .bubbleShowDoctor, object: nil)
+        })
+        menu.addItem(.separator())
+        let awake = ClosureMenuItem("Keep Screen On", symbol: "cup.and.saucer") { KeepAwake.shared.toggle() }
+        awake.state = KeepAwake.shared.isOn ? .on : .off
+        menu.addItem(awake)
+        menu.addItem(ClosureMenuItem("Clean Screen", symbol: "paintbrush") { CleanScreen.shared.start() })
+        menu.addItem(.separator())
+        menu.addItem(ClosureMenuItem("About Bubble", symbol: "info.circle") {
+            NSApp.orderFrontStandardAboutPanel(options: [
+                .credits: NSAttributedString(string: "Bubble is free and open source.\nCleaning is done by Mole by tw93 (GPL-3.0)."),
+            ])
+            NSApp.activate(ignoringOtherApps: true)
+        })
+        let update = ClosureMenuItem("Check for Updates…", symbol: "arrow.triangle.2.circlepath") { Updater.shared.checkForUpdates() }
+        update.isEnabled = Updater.shared.canCheckForUpdates
+        menu.autoenablesItems = false
+        menu.addItem(update)
+        // The menu's top-left corner goes 6pt below the view's bottom-left corner.
+        let y = view.isFlipped ? view.bounds.maxY + 6 : view.bounds.minY - 6
+        menu.popUp(positioning: nil, at: NSPoint(x: view.bounds.minX, y: y), in: view)
     }
 }
 
@@ -317,40 +345,6 @@ private struct MenuAnchorView: NSViewRepresentable {
         return v
     }
     func updateNSView(_ view: NSView, context: Context) { anchor.view = view }
-}
-
-/// The app menu: Settings, Checkup, Keep Screen On, Clean Screen, About, Updates.
-/// Opens under `view` when given, else at the pointer.
-@MainActor
-func showAppMenu(under view: NSView?, openSettings: @escaping () -> Void) {
-    let menu = NSMenu()
-    menu.addItem(ClosureMenuItem("Settings…", symbol: "gearshape") { openSettings() })
-    menu.addItem(ClosureMenuItem("Run Checkup", symbol: "stethoscope") {
-        NotificationCenter.default.post(name: .bubbleShowDoctor, object: nil)
-    })
-    menu.addItem(.separator())
-    let awake = ClosureMenuItem("Keep Screen On", symbol: "cup.and.saucer") { KeepAwake.shared.toggle() }
-    awake.state = KeepAwake.shared.isOn ? .on : .off
-    menu.addItem(awake)
-    menu.addItem(ClosureMenuItem("Clean Screen", symbol: "paintbrush") { CleanScreen.shared.start() })
-    menu.addItem(.separator())
-    menu.addItem(ClosureMenuItem("About Bubble", symbol: "info.circle") {
-        NSApp.orderFrontStandardAboutPanel(options: [
-            .credits: NSAttributedString(string: "Bubble is free and open source.\nCleaning is done by Mole by tw93 (GPL-3.0)."),
-        ])
-        NSApp.activate(ignoringOtherApps: true)
-    })
-    let update = ClosureMenuItem("Check for Updates…", symbol: "arrow.triangle.2.circlepath") { Updater.shared.checkForUpdates() }
-    update.isEnabled = Updater.shared.canCheckForUpdates
-    menu.autoenablesItems = false
-    menu.addItem(update)
-    if let view, view.window != nil {
-        // The menu's top-left corner goes 6pt below the view's bottom-left corner.
-        let y = view.isFlipped ? view.bounds.maxY + 6 : view.bounds.minY - 6
-        menu.popUp(positioning: nil, at: NSPoint(x: view.bounds.minX, y: y), in: view)
-    } else {
-        menu.popUp(positioning: nil, at: NSPoint(x: NSEvent.mouseLocation.x - 20, y: NSEvent.mouseLocation.y - 26), in: nil)
-    }
 }
 
 /// Empty space around the section bar drags the window, as a title bar would; a

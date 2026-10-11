@@ -239,15 +239,15 @@ final class SudoPromptTests: XCTestCase {
         XCTAssertEqual(PromptResponder.classify(tok, sudoPrompt: tok), .sudoPassword)
         XCTAssertEqual(PromptResponder.classify("Password:", sudoPrompt: tok), .otherPassword)
         XCTAssertEqual(PromptResponder.classify("[sudo] password for nitin:", sudoPrompt: tok), .otherPassword)
-        XCTAssertEqual(PromptResponder.decide(kind: .otherPassword, policy: .optimize), .decline("\n"))
+        XCTAssertEqual(PromptResponder.decide(kind: .otherPassword), .decline("\n"))
         XCTAssertNotEqual(PTYSession.makeSudoPrompt(), PTYSession.makeSudoPrompt())
         XCTAssertTrue(PTYSession.makeSudoPrompt().hasSuffix(":"))
         XCTAssertFalse(PTYSession.makeSudoPrompt().contains("%"))
     }
 
-    private func run(_ script: String, policy: PromptPolicy) async -> (lines: [String], responder: PromptResponder) {
+    private func run(_ script: String) async -> (lines: [String], responder: PromptResponder) {
         let session = PTYSession("/bin/bash", ["-c", script])
-        let responder = PromptResponder(policy: policy)
+        let responder = PromptResponder()
         var lines: [String] = []
         for await line in session.lines {
             if !responder.handle(line, session) { lines.append(line) }
@@ -257,17 +257,19 @@ final class SudoPromptTests: XCTestCase {
 
     func testLookalikePasswordPromptGetsNothing() async {
         let script = #"printf 'Password:'; IFS= read -r p; echo "len=${#p}""#
-        let (lines, r) = await run(script, policy: .optimize)
+        let (lines, r) = await run(script)
         XCTAssertTrue(lines.contains("len=0"), "\(lines)")
         XCTAssertEqual(r.skippedPrompts, ["Password:"])
         XCTAssertFalse(r.adminSkipped)
     }
 
-    func testRealSudoPromptGetsNothingInStrictPolicy() async {
-        let script = #"printf '%s' "$SUDO_PROMPT"; IFS= read -r p; echo "rc=$? len=${#p}""#
-        let (lines, r) = await run(script, policy: .strict)
-        XCTAssertTrue(lines.contains("rc=0 len=0"), "\(lines)")
-        XCTAssertEqual(r.skippedPrompts.count, 1)
+    func testRealSudoPromptGetsOnlyEndOfInput() async {
+        // Ctrl-D ends the read with nothing typed (rc=1), unlike Return (rc=0).
+        let script = #"stty -echo; printf '%s' "$SUDO_PROMPT"; IFS= read -r p; echo "rc=$? len=${#p}""#
+        let (lines, r) = await run(script)
+        XCTAssertTrue(lines.contains("rc=1 len=0"), "\(lines)")
+        XCTAssertTrue(r.adminSkipped)
+        XCTAssertEqual(r.skippedPrompts, [])
     }
 }
 

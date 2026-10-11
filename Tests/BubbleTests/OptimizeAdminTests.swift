@@ -7,7 +7,7 @@ final class OptimizeNoAdminTests: XCTestCase {
     func testSudoPromptIsEndedWithoutAskingAnyone() async {
         let script = #"echo start; stty -echo; printf '%s' "$SUDO_PROMPT"; IFS= read -r p; echo "rc=$? len=${#p}"; echo after"#
         let session = PTYSession("/bin/bash", ["-c", script])
-        let responder = PromptResponder(policy: .optimize)
+        let responder = PromptResponder()
         var lines: [String] = []
         for await line in session.lines {
             if !responder.handle(line, session) { lines.append(line) }
@@ -28,7 +28,7 @@ final class OptimizeNoAdminTests: XCTestCase {
         XCTAssertEqual(env["MOLE_PAM_SUDO_FILE"], "/dev/null")
         let script = #"echo "which=$(command -v sudo)"; sudo -k; echo k=$?; sudo -v; echo v=$?; sudo -n true; echo n=$?"#
         let session = PTYSession("/bin/bash", ["-c", script], environment: env)
-        let responder = PromptResponder(policy: .optimize)
+        let responder = PromptResponder()
         var lines: [String] = []
         for await line in session.lines {
             if !responder.handle(line, session) { lines.append(line) }
@@ -277,6 +277,37 @@ final class AdminTests: XCTestCase {
         let out = try await Admin.runWithSudo("true", timeout: 10, sudo: sudo)
         XCTAssertNil(out)
         XCTAssertFalse(FileManager.default.fileExists(atPath: dir.appendingPathComponent("typed").path))
+    }
+
+    func testSudoRefusingUserMeansFallBack() async throws {
+        // A standard user after Touch ID, with pam_tid enabled for everyone: an
+        // administrator can still authorize the run in the dialog.
+        for refusal in ["nitin is not in the sudoers file.", "Sorry, user nitin is not allowed to run sudo on mac."] {
+            let (dir, sudo) = try fakeSudo("echo \"\(refusal)\"; exit 1")
+            defer { try? FileManager.default.removeItem(at: dir) }
+            let out = try await Admin.runWithSudo("true", timeout: 10, sudo: sudo)
+            XCTAssertNil(out, refusal)
+        }
+    }
+
+    func testSudoRouteKeepsShellErrorLines() async throws {
+        let (dir, sudo) = try fakeSudo(#"shift; exec "$@""#)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let out = try await Admin.runWithSudo(#"echo '/var/db ok'; echo '| piped'"#, timeout: 10, sudo: sudo)
+        XCTAssertEqual(out, "/var/db ok\n| piped\n")
+        do {
+            _ = try await Admin.runWithSudo("true\n\nbubble_no_such_command", timeout: 10, sudo: sudo)
+            XCTFail("expected failure")
+        } catch {
+            guard case .failed(let why)? = error as? Admin.Failure else { return XCTFail("\(error)") }
+            XCTAssertTrue(why.hasPrefix("/bin/sh: line ") && why.contains("bubble_no_such_command"), why)
+        }
+    }
+
+    func testIsAdministrator() {
+        XCTAssertTrue(Admin.isAdministrator("root"))
+        XCTAssertFalse(Admin.isAdministrator("nobody"))
+        XCTAssertFalse(Admin.isAdministrator("bubble-no-such-user-\(UUID().uuidString)"))
     }
 
     func testSudoFailureIsReported() async throws {

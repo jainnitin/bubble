@@ -68,7 +68,6 @@ struct MetricCard<Body: View>: View {
                             }
                             .fixedSize()
                         }
-                        if let badge { Tag(text: badge).lineLimit(1) }
                     }
                 }
                 content

@@ -101,7 +101,7 @@ final class OptimizeModel {
             let shim = MoleNoSudo.make()
             defer { MoleNoSudo.remove(shim) }
             let session = PTYSession(mo, ["optimize"], environment: MoleNoSudo.environment(shimDir: shim))
-            let responder = PromptResponder(policy: .optimize)
+            let responder = PromptResponder()
             var log = OptimizeLog(adminTasksOn: adminTasks, skippedForFullDiskAccess: fdaSkips)
             for await line in session.lines {
                 if responder.handle(line, session) { continue }

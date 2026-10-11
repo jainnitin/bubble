@@ -6,7 +6,8 @@ import Foundation
 /// work and Bubble would have to collect the password. Instead `mo optimize` runs with
 /// sudo unavailable (see `MoleNoSudo`), Mole skips its admin tasks and says which ones it
 /// skipped, and Bubble runs the worthwhile ones in one `Admin.run` call at the end, behind
-/// the system authorization dialog (Touch ID or password), mirroring Mole's conditions:
+/// Touch ID when sudo has it enabled, otherwise the macOS authorization dialog, which asks
+/// for an administrator's name and password. The jobs mirror Mole's conditions:
 ///
 /// - DNS cache flush: Mole flushes on every run unless a VPN is the default route
 ///   (flushing makes VPN clients reconnect, and an unknown VPN state also skips).
@@ -196,7 +197,7 @@ struct OptimizeLog {
 /// fail the same way without cached credentials. `MOLE_PAM_SUDO_*` only tells Mole's
 /// `check_touchid_support` that Touch ID isn't set up, which skips its 5-second Touch ID
 /// attempt and the "Touch ID dialog may appear" note. If the folder can't be made, the
-/// run still works: sudo's prompt is ended with Ctrl-D (`PromptPolicy.optimize`).
+/// run still works: sudo's prompt is ended with Ctrl-D (`PromptResponder`).
 enum MoleNoSudo {
     static let shim = """
     #!/bin/sh

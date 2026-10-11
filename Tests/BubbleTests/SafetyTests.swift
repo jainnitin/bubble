@@ -70,8 +70,8 @@ final class PromptPolicyTests: XCTestCase {
         XCTAssertEqual(PromptResponder.classify("Name:"), .unknown)
     }
 
-    func testOptimizeOnlySkipsSudo() {
-        let d = { (k: PromptKind) in PromptResponder.decide(kind: k, policy: .optimize) }
+    func testOnlySudoIsSkippedEverythingElseDeclined() {
+        let d = { (k: PromptKind) in PromptResponder.decide(kind: k) }
         XCTAssertEqual(d(.sudoPassword), .skipAdmin)
         XCTAssertEqual(d(.otherPassword), .decline("\n"))
         XCTAssertEqual(d(PromptResponder.classify("◎ Detach now? Enter confirm / Space cancel:")), .decline(" "))
@@ -80,12 +80,15 @@ final class PromptPolicyTests: XCTestCase {
         XCTAssertEqual(d(.unknown), .declineUnknown)
     }
 
-    func testStrictAndDetection() {
-        XCTAssertEqual(PromptPolicy.detect(arguments: ["optimize"]), .optimize)
-        XCTAssertEqual(PromptPolicy.detect(arguments: ["uninstall", "Xcode"]), .strict)
-        XCTAssertEqual(PromptPolicy.detect(arguments: ["clean"]), .strict)
-        XCTAssertEqual(PromptResponder.decide(kind: .sudoPassword, policy: .strict), .decline("\n"))
-        XCTAssertEqual(PromptResponder.decide(kind: .otherPassword, policy: .strict), .decline("\n"))
+    func testNoReplyCarriesASecret() {
+        // Every reply is a fixed refusal: Ctrl-D, an empty line, "n" or a cancel key.
+        let kinds: [PromptKind] = [.sudoPassword, .otherPassword, .yesNo, .keyChoice(cancel: " "), .keyChoice(cancel: "q"), .unknown]
+        for kind in kinds {
+            switch PromptResponder.decide(kind: kind) {
+            case .skipAdmin, .declineUnknown: break
+            case .decline(let text): XCTAssertTrue(["\n", "n\n", " ", "q"].contains(text), "\(kind) → \(text)")
+            }
+        }
     }
 }
 

@@ -164,7 +164,7 @@ final class DoctorModel {
             } catch {
                 log = Self.touchIDFailureMessage(error)
                 Clipboard.copy(Self.touchIDTerminalCommand)
-                NSWorkspace.shared.open(URL(fileURLWithPath: "/System/Applications/Utilities/Terminal.app"))
+                Terminal.open()
             }
         case .updateMole:
             // Same runner as setup and Settings: Homebrew or Mole's updater, dry run when simulating.

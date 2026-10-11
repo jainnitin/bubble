@@ -19,7 +19,7 @@ struct AppsView: View {
             switch sub {
             case .uninstall:
                 if uninstall.apps.isEmpty {
-                    // Shown only until the first (fast, native) listing arrives.
+                    // Shown only until the first listing arrives.
                     HeroView {
                         Headline(text: "Your apps")
                         Lede(text: "Remove apps along with the settings, caches and helpers they leave behind.")
