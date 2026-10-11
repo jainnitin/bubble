@@ -513,12 +513,34 @@ final class AppRemovalTests: XCTestCase {
             if p == owned { throw posix(EACCES) }          // root-owned: admin can fix
             try fake(p)
         }
+        let me = r.uid
+        r.ownerUID = { $0 == owned ? 0 : me }
         let (result, pending) = await r.remove(app, items: mac.items(app), owner: 0)
         XCTAssertTrue(result.removed)
         XCTAssertEqual(result.blockedByPrivacy, [containerDir])
         XCTAssertEqual(result.problems, [])
         XCTAssertEqual(pending.map(\.item.path), [owned])
         XCTAssertEqual(mac.trashContents(), ["Boxed.app", "com.example.boxed.plist"])
+    }
+
+    /// A bare "no permission" error on your own container (what macOS returned for a real
+    /// app's container) is privacy protection: admin rights can't move it, so don't ask.
+    func testOwnItemBlockedWithoutPOSIXCodeIsNotSentToAdmin() async throws {
+        let mac = try FakeMac()
+        let path = try mac.app("Boxed", id: "com.example.boxed")
+        try mac.file(mac.lib("Containers/com.example.boxed/Data/x"))
+        let containerDir = mac.lib("Containers/com.example.boxed")
+        let app = info(mac, path)
+        var r = mac.remover()
+        let fake = mac.fakeTrash
+        r.trash = { p in
+            if p == containerDir { throw NSError(domain: NSCocoaErrorDomain, code: NSFileWriteNoPermissionError) }
+            try fake(p)
+        }
+        let (result, pending) = await r.remove(app, items: mac.items(app), owner: 0)
+        XCTAssertTrue(result.removed)
+        XCTAssertEqual(result.blockedByPrivacy, [containerDir])
+        XCTAssertEqual(pending, [])
     }
 
     func testBlockedKind() {

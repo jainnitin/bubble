@@ -46,6 +46,7 @@ struct AppRemover: Sendable {
     var admin: @Sendable (_ script: String, _ prompt: String) async throws -> String = { try await Admin.run($0, prompt: $1) }
     var tool: @Sendable (_ exe: String, _ args: [String], _ env: [String: String]) async -> ToolResult = { await AppRemover.runTool($0, $1, env: $2) }
     var quit: @Sendable (_ path: String) async -> QuitOutcome = { await AppRemover.quitApp(path: $0) }
+    var ownerUID: @Sendable (String) -> uid_t? = { AppLeftovers.ownerUID($0) }
 
     // MARK: Per app
 
@@ -112,9 +113,10 @@ struct AppRemover: Sendable {
                 result.freed += item.bytes
             } catch {
                 switch Self.blockedKind(error) {
-                case .privacy? where !item.isApp:
-                    // macOS privacy protection (TCC): admin rights don't get past it either,
-                    // so don't ask for them. Report it and keep going with the rest.
+                case .privacy? where !item.isApp, .ownership? where ownerUID(item.path) == uid:
+                    // macOS privacy protection (TCC), or an item you already own: admin
+                    // rights don't get past either, so don't ask for them. Report it and
+                    // keep going with the rest.
                     result.blockedByPrivacy.append(item.path)
                 case .privacy?, .ownership?:
                     pending.append(PendingAdmin(owner: owner, item: item))

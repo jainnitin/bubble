@@ -333,6 +333,12 @@ enum AppLeftovers {
     /// True when something exists at `path`, without following a final symlink.
     static func exists(_ path: String) -> Bool { existence(path) != .missing }
 
+    /// The owner of `path` itself (lstat), or nil if it can't be read.
+    static func ownerUID(_ path: String) -> uid_t? {
+        var st = stat()
+        return lstat(path, &st) == 0 ? st.st_uid : nil
+    }
+
     enum Existence: Equatable { case present, missing, protected }
 
     /// lstat only (never reads contents or follows a final symlink). EPERM/EACCES mean the
