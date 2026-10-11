@@ -270,7 +270,8 @@ enum Shell {
 
     /// Runs a command to completion and returns stdout (stderr discarded).
     /// `timeout` (seconds) terminates a command that runs too long; its output so far is returned.
-    static func output(_ exe: String, _ args: [String], input: String? = nil, timeout: TimeInterval? = nil) async -> Data {
+    /// `sandbox`: a `PrivacyGuard` profile to run it under (see Core/Privacy.swift).
+    static func output(_ exe: String, _ args: [String], input: String? = nil, timeout: TimeInterval? = nil, sandbox: String? = nil) async -> Data {
         await withCheckedContinuation { cont in
             DispatchQueue.global(qos: .userInitiated).async {
                 if let why = refusal(exe) {
@@ -278,7 +279,8 @@ enum Shell {
                     cont.resume(returning: Data())
                     return
                 }
-                let p = makeProcess(exe, args)
+                let run = PrivacyGuard.command(exe, args, profile: sandbox)
+                let p = makeProcess(run.exe, run.args)
                 let out = Pipe()
                 p.standardOutput = out
                 p.standardError = FileHandle.nullDevice
@@ -299,9 +301,9 @@ enum Shell {
         }
     }
 
-    static func moJSON(_ args: [String]) async -> Data {
+    static func moJSON(_ args: [String], sandbox: String? = nil) async -> Data {
         guard let mo else { return Data() }
-        return await output(mo, args)
+        return await output(mo, args, sandbox: sandbox)
     }
 
     static func moText(_ args: [String], input: String? = nil) async -> String {
@@ -312,14 +314,15 @@ enum Shell {
 
     /// Streams stdout+stderr line by line, with ANSI codes removed.
     /// Cancelling the consuming task terminates the process.
-    static func lines(_ exe: String, _ args: [String], input: String? = nil) -> AsyncStream<String> {
+    static func lines(_ exe: String, _ args: [String], input: String? = nil, sandbox: String? = nil) -> AsyncStream<String> {
         AsyncStream { cont in
             if let why = refusal(exe) {
                 cont.yield(why)
                 cont.finish()
                 return
             }
-            let p = makeProcess(exe, args)
+            let run = PrivacyGuard.command(exe, args, profile: sandbox)
+            let p = makeProcess(run.exe, run.args)
             let pipe = Pipe()
             p.standardOutput = pipe
             p.standardError = pipe
@@ -340,11 +343,11 @@ enum Shell {
         }
     }
 
-    static func moLines(_ args: [String], input: String? = nil) -> AsyncStream<String> {
+    static func moLines(_ args: [String], input: String? = nil, sandbox: String? = nil) -> AsyncStream<String> {
         guard let mo else {
             return AsyncStream { $0.yield("Mole isn't installed. Open Bubble to set it up."); $0.finish() }
         }
-        return lines(mo, args, input: input)
+        return lines(mo, args, input: input, sandbox: sandbox)
     }
 
     private static func inputHandle(_ input: String?) -> Any {

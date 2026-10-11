@@ -138,12 +138,43 @@ enum SystemSettings {
         NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.LoginItems-Settings.extension")!)
     }
 
-    /// Full Disk Access can't be queried directly; reading a TCC-protected file is the standard probe.
+    /// Files and folders only Full Disk Access can open. None of them makes macOS show a
+    /// prompt: without access, opening them just fails. The system TCC database exists on
+    /// every Mac, so the probe works even without Safari, Mail or a Trash.
+    static let fullDiskAccessProbes: [String] = [
+        "/Library/Application Support/com.apple.TCC/TCC.db",
+        Shell.home + "/Library/Safari/Bookmarks.plist",
+        Shell.home + "/.Trash",
+        Shell.home + "/Library/Mail",
+    ]
+
+    /// Full Disk Access can't be queried directly; opening a protected file is the standard
+    /// probe. Also true when a fresh child process could (see `childProcessHasFullDiskAccess`).
+    /// Every Full Disk Access check in Bubble goes through here, including the
+    /// `-simulateNoFullDiskAccess YES` dev switch.
     static var hasFullDiskAccess: Bool {
-        let probe = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Safari/Bookmarks.plist")
-        if FileManager.default.isReadableFile(atPath: probe.path) { return true }
-        let tcc = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/com.apple.TCC/TCC.db")
-        return FileManager.default.isReadableFile(atPath: tcc.path)
+        #if BUBBLE_DEV
+        if UserDefaults.standard.bool(forKey: "simulateNoFullDiskAccess") { return false }
+        #endif
+        if probeLock.withLock({ childProbe }) == true { return true }
+        return fullDiskAccessProbes.contains { path in
+            let fd = open(path, O_RDONLY | O_NONBLOCK)
+            if fd >= 0 { close(fd); return true }
+            return false
+        }
+    }
+
+    private static let probeLock = NSLock()
+    nonisolated(unsafe) private static var childProbe: Bool?
+
+    static func noteChildProbe(_ on: Bool) { probeLock.withLock { childProbe = on } }
+
+    /// Asks a new process to read the system TCC database. macOS applies a Full Disk Access
+    /// grant to processes started after it, so this sees a grant made while Bubble was
+    /// running, which is what every `mo` Bubble starts from then on will get.
+    static func childProcessHasFullDiskAccess() async -> Bool {
+        let data = await Shell.output("/usr/bin/head", ["-c", "1", fullDiskAccessProbes[0]], timeout: 5)
+        return !data.isEmpty
     }
 }
 

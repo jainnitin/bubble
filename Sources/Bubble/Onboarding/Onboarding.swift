@@ -72,7 +72,7 @@ struct SetupView: View {
         case .failed(_, let why): why
         case .untrusted(let why): why
         case .success: "Mole is ready"
-        case .access: "Allow Full Disk Access"
+        case .access: "Full Disk Access is optional"
         default: nil
         }
         if let text { AccessibilityNotification.Announcement(text).post() }
@@ -232,52 +232,46 @@ private struct SuccessStep: View {
 
 private struct AccessStep: View {
     let install: MoleInstall
-    @State private var checkedAndOff = false
+    @State private var access = FullDiskAccess.shared
 
     var body: some View {
         Label("Mole \(install.version ?? "") is installed.", systemImage: "checkmark.circle.fill")
             .font(.ui(.secondary, .medium))
             .foregroundStyle(Palette.green)
-        Headline(text: "Allow Full Disk Access")
-        Lede(text: "macOS keeps Trash, Mail and some app data private. With Full Disk Access, Bubble can find and clean what's there. Without it, scans skip those folders.")
+        Headline(text: "Full Disk Access is optional")
+        Lede(text: "Bubble works without it. Clean still clears app, browser and developer caches and logs; Analyze still maps your disk; Apps and Status work fully. Bubble just skips the places macOS keeps private, without setting off permission dialogs.")
         VStack(alignment: .leading, spacing: Space.s) {
-            step(1, "Click Open System Settings.")
-            step(2, "Turn on Bubble in the list. Use + to add it if it isn't there.")
-            step(3, "Come back here. Bubble checks on its own.")
+            point("lock.open", "With it, scans also cover Trash, Mail, Desktop, Documents, Downloads and caches inside other apps.")
+            point("hand.raised", "Either way, nothing Bubble reads leaves your Mac. You can change this any time in Settings.")
         }
-        PillButton(title: "Open System Settings") { SystemSettings.openFullDiskAccess() }
-            .keyboardShortcut(.defaultAction)
-        HStack(spacing: Space.l) {
-            LinkButton(title: "Check again") { check() }
-            LinkButton(title: "Later") { install.finishAccess(skipped: true) }
+        HStack(spacing: Space.m) {
+            PillButton(title: "Continue without it") { install.finishAccess(skipped: true) }
+                .keyboardShortcut(.defaultAction)
+            LinkButton(title: "Open System Settings", color: Palette.accent) { FullDiskAccess.shared.openSettings() }
+                .font(.ui(.body, .medium))
         }
-        .font(.ui(.secondary, .medium))
-        if checkedAndOff {
-            Hint(icon: "exclamationmark.circle", text: "Still off. If you just turned it on, quit and reopen Bubble.")
+        if access.returnedWithoutGrant {
+            HStack(spacing: Space.m) {
+                Hint(icon: "info.circle", text: "Turned Bubble on in the list? macOS may need Bubble to restart.")
+                LinkButton(title: "Relaunch Bubble", color: Palette.accent) { AppRelaunch.relaunch() }
+                    .font(.ui(.secondary, .medium))
+            }
         }
         Color.clear.frame(height: 0)
-            .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in check(quiet: true) }
+            // FullDiskAccess re-checks when Bubble comes back to the front.
+            .onChange(of: access.isOn) { _, on in if on { install.finishAccess(skipped: false) } }
     }
 
-    private func step(_ n: Int, _ text: String) -> some View {
+    private func point(_ icon: String, _ text: String) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: Space.s) {
-            Text("\(n)")
-                .font(.num(.caption, .semibold))
-                .foregroundStyle(Palette.abyss)
-                .frame(width: 18, height: 18)
-                .background(Palette.accent, in: Circle())
+            Image(systemName: icon).foregroundStyle(Palette.accent).frame(width: 18).accessibilityHidden(true)
             Text(text).font(.ui(.body)).foregroundStyle(Palette.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
+        .frame(maxWidth: 520, alignment: .leading)
         .accessibilityElement(children: .combine)
     }
 
-    private func check(quiet: Bool = false) {
-        if MoleInstall.hasFullDiskAccess {
-            install.finishAccess(skipped: false)
-        } else if !quiet {
-            checkedAndOff = true
-        }
-    }
 }
 
 // MARK: - Pieces

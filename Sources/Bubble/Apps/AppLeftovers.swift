@@ -13,11 +13,14 @@ struct AppRoots: Sendable, Equatable {
     var systemLibrary: String
     /// Homebrew's Caskroom folders, read to tell which apps a cask manages.
     var caskrooms: [String]
+    /// macOS's own apps (and one level of subfolders, so Utilities too). Read only so their
+    /// names are never matched as another app's leftovers; never listed or removed.
+    var systemAppFolders: [String] = []
 
     static let live: AppRoots = {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         return AppRoots(home: home, appFolders: ["/Applications", home + "/Applications"], systemLibrary: "/Library",
-                        caskrooms: ["/opt/homebrew/Caskroom", "/usr/local/Caskroom"])
+                        caskrooms: ["/opt/homebrew/Caskroom", "/usr/local/Caskroom"], systemAppFolders: ["/System/Applications"])
     }()
 
     var library: String { home + "/Library" }
@@ -56,8 +59,9 @@ struct Leftover: Identifiable, Hashable, Sendable {
     var bytes: Double?
     /// In /Library: removing it needs admin rights.
     var isSystem = false
-    /// Can't be measured without Full Disk Access (another app's container).
-    var sizeUnknown = false
+    /// Another app's container while Bubble lacks Full Disk Access: macOS won't let Bubble
+    /// move or measure it, so it's shown but never removed or counted.
+    var isProtected = false
     var id: String { path }
 
     var isContainer: Bool { path.contains("/Library/Containers/") || path.contains("/Library/Group Containers/") }
@@ -453,16 +457,16 @@ enum AppLeftovers {
 
 /// Lists installed apps without Mole.
 enum AppScanner {
-    /// Every .app in the app folders and one level of their subfolders. Symlinked apps
-    /// and folders are skipped.
-    static func bundlePaths(_ roots: AppRoots) -> [String] {
+    /// Every .app in the folders and one level of their subfolders. Symlinked apps and
+    /// folders are skipped.
+    static func bundlePaths(_ folders: [String]) -> [String] {
         let fm = FileManager.default
         let keys: [URLResourceKey] = [.isDirectoryKey, .isSymbolicLinkKey]
         func children(_ dir: String) -> [URL] {
             (try? fm.contentsOfDirectory(at: URL(fileURLWithPath: dir), includingPropertiesForKeys: keys, options: [.skipsHiddenFiles])) ?? []
         }
         var out: [String] = []
-        for folder in roots.appFolders {
+        for folder in folders {
             for url in children(folder) {
                 let v = try? url.resourceValues(forKeys: Set(keys))
                 guard v?.isSymbolicLink != true, v?.isDirectory == true else { continue }
@@ -500,7 +504,7 @@ enum AppScanner {
 
     struct Result: Sendable {
         var apps: [AppInfo]
-        /// Every bundle found, including protected and Apple apps.
+        /// Every bundle found, including protected, Apple and macOS's own apps.
         var identities: [AppIdentity]
         var unresolvedCasks: [String]
     }
@@ -511,7 +515,11 @@ enum AppScanner {
         let casks = AppLeftovers.caskroomApps(roots.caskrooms)
         var apps: [AppInfo] = []
         var identities: [AppIdentity] = []
-        for path in bundlePaths(roots) {
+        for path in bundlePaths(roots.systemAppFolders) {
+            let bid = info(path)?["CFBundleIdentifier"] as? String ?? ""
+            identities.append(AppIdentity(name: displayName(path), path: path, bundleId: bid))
+        }
+        for path in bundlePaths(roots.appFolders) {
             let info = info(path)
             let bid = info?["CFBundleIdentifier"] as? String ?? ""
             let name = displayName(path)
@@ -528,7 +536,6 @@ enum AppScanner {
                 source: token != nil ? "Homebrew" : isMAS ? "App Store" : "App",
                 uninstallName: token ?? "",
                 path: path,
-                sizeText: "",
                 bytes: sized ? cached![0] : 0,
                 version: info?["CFBundleShortVersionString"] as? String ?? info?["CFBundleVersion"] as? String ?? "",
                 lastUsed: md.flatMap { MDItemCopyAttribute($0, kMDItemLastUsedDate) as? Date },
