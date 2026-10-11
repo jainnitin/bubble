@@ -22,8 +22,8 @@ Terminal. The one exception is uninstalling apps, which Bubble does natively (se
 
 ## Install
 
-1. Download `Bubble-X.Y.Z.zip` from the [latest release](https://github.com/jainnitin/bubble/releases/latest),
-   unzip it and drag **Bubble** to Applications.
+1. Download `Bubble-X.Y.Z.dmg` from the [latest release](https://github.com/jainnitin/bubble/releases/latest),
+   open it and drag **Bubble** to Applications.
 2. Open it. If Mole isn't installed yet, Bubble installs it for you.
 3. Optionally give Bubble **Full Disk Access**. Bubble works without it: Clean and Analyze skip
    the places macOS keeps private (and say so) instead of setting off permission dialogs.
@@ -198,11 +198,21 @@ One-time setup:
 To cut a release, bump `VERSION`, commit, then `git tag v$(cat VERSION) && git push --tags`.
 `.github/workflows/release.yml` runs `scripts/release.sh` in the `release` environment: it builds
 the app, signs it with Developer ID, notarizes and staples it, zips it with `ditto`, signs the zip, writes a signed `appcast.xml` with Sparkle's
-`generate_appcast`, and checks the signature against `SU_PUBLIC_ED_KEY`. A separate job without
-the key then attaches both files to the GitHub Release. If `release-notes/X.Y.Z.md` exists, it
+`generate_appcast`, and checks the signature against `SU_PUBLIC_ED_KEY`. It then packs the same app
+into `Bubble-X.Y.Z.dmg` for downloads (`scripts/dmg.sh`), and signs, notarizes and staples the DMG
+too. A separate job without the key then attaches the DMG, the zip and `appcast.xml` to the GitHub
+Release. Sparkle only uses the zip and the appcast; the DMG is what people download to install. If `release-notes/X.Y.Z.md` exists, it
 appears in the update dialog. To build a release locally with the Keychain key, run
 `scripts/release.sh` (the output goes to `dist/`); `SKIP_NOTARIZE=1` skips notarization for a
 test build.
+
+The DMG window (Bubble.app, an Applications shortcut and an arrow between them) is laid out by
+[dmgbuild](https://github.com/dmgbuild/dmgbuild), which writes Finder's `.DS_Store` directly, so it
+works on a headless CI runner without scripting Finder. `scripts/dmg.sh` installs it into
+`build/dmgbuild-venv` from `scripts/dmg/requirements.txt` (pinned by hash); its settings are in
+`scripts/dmg/settings.py`. To try the DMG without releasing:
+`scripts/bundle.sh && scripts/dmg.sh build/Bubble.app build/Bubble.dmg`. The background
+(`assets/dmg-background.png` and `@2x`) is drawn by `swift scripts/dmg/render-background.swift`.
 
 Builds use the hardened runtime with the `com.apple.security.automation.apple-events` entitlement
 (Mole runs `osascript`, and macOS checks Bubble for it). `scripts/bundle.sh` signs with the first
@@ -245,7 +255,7 @@ Sources/Bubble/
   Status/                mo status model, native sensors (SMC, GPU, processes), cards, menu bar panel
   Settings/              the window and its panes, including the Protected Items editor
 Tests/BubbleTests/       unit tests, plus pseudo-terminal tests with scripted prompts
-scripts/                 bundle.sh, release.sh, verify-update.swift, shot.sh, icon/
+scripts/                 bundle.sh, release.sh, dmg.sh, verify-update.swift, shot.sh, icon/, dmg/
 ```
 
 ## Known limits

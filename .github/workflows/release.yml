@@ -10,7 +10,9 @@
 #
 # Supply chain: every action is pinned to a full commit SHA (the comment names its tag). To bump
 # one: gh api repos/<owner>/<action>/git/ref/tags/<tag>  (dereference annotated tags with
-# gh api repos/<owner>/<action>/git/tags/<sha>), then update the SHA and the comment.
+# gh api repos/<owner>/<action>/git/tags/<sha>), then update the SHA and the comment. The DMG's
+# layout tool, dmgbuild, comes from PyPI pinned by wheel hash (scripts/dmg/requirements.txt);
+# pip installs wheels only, so nothing runs at install time.
 name: Release
 
 on:
@@ -93,7 +95,7 @@ jobs:
       - name: Resolve packages from Package.resolved only
         run: swift package --force-resolved-versions resolve
 
-      - name: Build, sign update, generate appcast
+      - name: Build, sign update, generate appcast, build DMG
         run: scripts/release.sh "${GITHUB_REF_NAME#v}"
         env:
           SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
@@ -111,6 +113,7 @@ jobs:
           name: release-files
           path: |
             dist/Bubble-*.zip
+            dist/Bubble-*.dmg
             dist/appcast.xml
           if-no-files-found: error
           retention-days: 7
@@ -132,7 +135,7 @@ jobs:
       - name: Publish GitHub Release
         run: |
           V="${GITHUB_REF_NAME#v}"
-          gh release create "$GITHUB_REF_NAME" "dist/Bubble-$V.zip" dist/appcast.xml \
+          gh release create "$GITHUB_REF_NAME" "dist/Bubble-$V.dmg" "dist/Bubble-$V.zip" dist/appcast.xml \
             --repo "$GITHUB_REPOSITORY" --title "Bubble $V" --generate-notes --verify-tag
         env:
           GH_TOKEN: ${{ github.token }}
