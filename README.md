@@ -44,7 +44,7 @@ Bubble is signed and notarized by Apple and updates itself.
 Also:
 
 - **First-run setup** installs or updates Mole for you (see Requirements) and asks for Full Disk Access.
-- **Checkup** (Bubble menu at the top of the sidebar) checks Mole, permissions, Touch ID for sudo,
+- **Checkup** (the Bubble logo at the left of the tab bar) checks Mole, permissions, Touch ID for sudo,
   free disk space and Mole's health score, with a fix for each problem.
 - **Settings**: Full Disk Access status, open at login, menu-bar-only mode, open straight to
   results, the Protected Items editor for Mole's whitelist, the menu bar display, and Mole's
@@ -203,7 +203,7 @@ stays alive while hidden so scans and running jobs survive switching sections.
 
 ```
 Sources/Bubble/
-  App.swift              app, window, sidebar, menu bar item, commands
+  App.swift              app, window, tab bar, menu bar item, commands
   Core/
     Shell.swift          runs child processes: fixed mo/brew paths, scrubbed environment,
                          system-first PATH, executable trust check, line streaming
