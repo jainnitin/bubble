@@ -24,7 +24,7 @@ final class VersionCompareTests: XCTestCase {
 
     private func app(_ version: String) -> AppInfo {
         AppInfo(name: "Claude", bundleId: "com.anthropic.claudefordesktop", source: "Homebrew", uninstallName: "claude",
-                path: "/Applications/Claude.app", sizeText: "", bytes: 0, version: version, lastUsed: nil, added: nil, menuBarOnly: false)
+                path: "/Applications/Claude.app", bytes: 0, version: version, lastUsed: nil, added: nil, menuBarOnly: false)
     }
 
     func testBrewOutdatedParsingAndSelfUpdatedApps() {
@@ -139,13 +139,14 @@ final class FakeMac {
     func trashContents() -> [String] { ((try? fm.contentsOfDirectory(atPath: roots.trash)) ?? []).sorted() }
 
     /// A trash function that moves into the fake ~/.Trash instead of the real one.
-    var fakeTrash: @Sendable (String) throws -> Void {
+    var fakeTrash: @Sendable (String) throws -> String {
         let trash = roots.trash
         return { path in
             var dest = trash + "/" + (path as NSString).lastPathComponent
             var n = 2
-            while FileManager.default.fileExists(atPath: dest) { dest = trash + "/" + (path as NSString).lastPathComponent + " \(n)"; n += 1 }
+            while AppLeftovers.exists(dest) { dest = trash + "/" + (path as NSString).lastPathComponent + " \(n)"; n += 1 }
             try FileManager.default.moveItem(atPath: path, toPath: dest)
+            return dest
         }
     }
 
@@ -155,21 +156,22 @@ final class FakeMac {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/bin/sh")
         p.arguments = ["-c", script.replacingOccurrences(of: "/bin/launchctl", with: ":")]
-        let err = Pipe()
+        let out = Pipe(), err = Pipe()
+        p.standardOutput = out
         p.standardError = err
         try p.run()
+        let output = String(decoding: out.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
         p.waitUntilExit()
         guard p.terminationStatus == 0 else {
             throw Admin.Failure.failed(String(decoding: err.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self))
         }
-        return ""
+        return output
     }
 
     func remover(admin: (@Sendable (String, String) async throws -> String)? = nil,
                  quit: AppRemover.QuitOutcome = .notRunning,
                  tool: (@Sendable (String, [String], [String: String]) async -> AppRemover.ToolResult)? = nil) -> AppRemover {
         var r = AppRemover(roots: roots)
-        r.brewPath = "/fake/brew"
         r.trash = fakeTrash
         r.admin = admin ?? Self.runAdminLocally
         r.quit = { _ in quit }
@@ -228,6 +230,20 @@ final class AppScanTests: XCTestCase {
         XCTAssertEqual(c.uninstallName, "claude")
         XCTAssertEqual(s.apps.first { $0.path == mas }?.source, "App Store")
         XCTAssertEqual(s.unresolvedCasks, ["some-font"])
+    }
+
+    func testMacOSAppsOnlyBlockNameMatches() throws {
+        let mac = try FakeMac()
+        var roots = mac.roots
+        roots.systemAppFolders = [mac.base + "/System/Applications"]
+        try mac.app("Chessboard", id: "com.example.chessboard.sys", in: roots.systemAppFolders[0] + "/Utilities")
+        let mine = try mac.app("Chessboard", id: "com.example.chessboard")
+        try mac.file(mac.lib("Application Support/Chessboard"))
+        let s = AppScanner.scan(roots)
+        XCTAssertEqual(s.apps.map(\.path), [mine])
+        XCTAssertTrue(s.identities.contains { $0.bundleId == "com.example.chessboard.sys" })
+        let me = try XCTUnwrap(s.identities.first { $0.path == mine })
+        XCTAssertEqual(AppLeftovers.discover(me, others: s.identities, index: LeftoverIndex.read(roots, fullDiskAccess: true), roots: roots), [])
     }
 
     func testBrewInfoParsing() {
@@ -384,12 +400,14 @@ final class AppRemovalTests: XCTestCase {
         })
         let app = info(mac, path)
         let (result, pending) = await r.remove(app, items: mac.items(app), owner: 0)
-        XCTAssertEqual(result.problems, [])
+        XCTAssertEqual(result.leftBehind, [])
         XCTAssertTrue(result.removed)
         XCTAssertEqual(pending.map(\.item.path), [daemon])
         let outcome = await r.removeWithAdmin(pending, prompt: "Bubble needs permission to remove “Crisp” and its system files.")
         XCTAssertFalse(outcome.cancelled)
         XCTAssertEqual(outcome.removed, [daemon])
+        XCTAssertEqual(outcome.moved, [daemon: mac.roots.trash + "/com.example.crisp.helper 2.plist"])
+        XCTAssertFalse(result.trashed.contains { $0.original == daemon })
 
         XCTAssertEqual(mac.trashContents(), ["Crisp.app", "com.example.crisp", "com.example.crisp.agent.plist",
                                              "com.example.crisp.helper 2.plist", "com.example.crisp.helper.plist", "com.example.crisp.plist"].sorted())
@@ -406,7 +424,7 @@ final class AppRemovalTests: XCTestCase {
         try FileManager.default.createSymbolicLink(atPath: mac.lib("Caches/com.example.linky"), withDestinationPath: mac.base + "/elsewhere")
         let app = info(mac, path)
         let (result, _) = await mac.remover().remove(app, items: mac.items(app), owner: 0)
-        XCTAssertEqual(result.problems, [])
+        XCTAssertEqual(result.leftBehind, [])
         XCTAssertTrue(FileManager.default.fileExists(atPath: target))
         XCTAssertEqual(try FileManager.default.destinationOfSymbolicLink(atPath: mac.roots.trash + "/com.example.linky"), mac.base + "/elsewhere")
     }
@@ -418,7 +436,7 @@ final class AppRemovalTests: XCTestCase {
         let (result, pending) = await mac.remover(quit: .stillRunning).remove(app, items: mac.items(app), owner: 0)
         XCTAssertFalse(result.removed)
         XCTAssertEqual(pending, [])
-        XCTAssertEqual(result.problems.count, 1)
+        XCTAssertEqual(result.leftBehind.map(\.path), [path])
         XCTAssertTrue(FileManager.default.fileExists(atPath: path))
     }
 
@@ -428,11 +446,11 @@ final class AppRemovalTests: XCTestCase {
         var app = info(mac, path)
         app.bundleId = "com.apple.Safari"
         var (result, _) = await mac.remover().remove(app, items: mac.items(app), owner: 0)
-        XCTAssertFalse(result.problems.isEmpty)
+        XCTAssertFalse(result.leftBehind.isEmpty)
         app = info(mac, path)
         app.bundleId = "com.example.other"      // a different app now sits at this path
         (result, _) = await mac.remover().remove(app, items: [RemovalItem(path: path, bytes: 0, isApp: true)], owner: 0)
-        XCTAssertFalse(result.problems.isEmpty)
+        XCTAssertFalse(result.leftBehind.isEmpty)
         XCTAssertTrue(FileManager.default.fileExists(atPath: path))
     }
 
@@ -444,59 +462,11 @@ final class AppRemovalTests: XCTestCase {
         let (result, _) = await mac.remover().remove(app, items: [RemovalItem(path: path, bytes: 0, isApp: true),
                                                                   RemovalItem(path: outside, bytes: 0)], owner: 0)
         XCTAssertTrue(result.removed)
-        XCTAssertEqual(result.problems.count, 1)
+        XCTAssertEqual(result.leftBehind.map(\.path), [outside])
         XCTAssertTrue(FileManager.default.fileExists(atPath: outside))
     }
 
-    func testHomebrewCaskUsesZapAndFallsBackOnlyWhenItNeedsSudo() async throws {
-        let mac = try FakeMac()
-        let path = try mac.app("Brewed", id: "com.example.brewed")
-        try mac.file(mac.lib("Caches/com.example.brewed"))
-        var app = info(mac, path)
-        app.source = "Homebrew"
-        app.uninstallName = "brewed"
-
-        // Homebrew fails for another reason: nothing is touched.
-        let calls = Recorder()
-        var r = mac.remover(tool: { exe, args, env in
-            await calls.add(([exe] + args).joined(separator: " ") + " " + (env["HOMEBREW_NO_AUTO_UPDATE"] ?? ""))
-            return .init(status: 1, output: "Error: Cask 'brewed' is unreadable")
-        })
-        var (result, _) = await r.remove(app, items: mac.items(app), owner: 0)
-        XCTAssertFalse(result.removed)
-        XCTAssertTrue(FileManager.default.fileExists(atPath: path))
-        let log = await calls.all
-        XCTAssertEqual(log, ["/fake/brew uninstall --cask --zap brewed 1"])
-
-        // Homebrew needs sudo: Bubble does it natively.
-        r = mac.remover(tool: { _, _, _ in .init(status: 1, output: "sudo: a terminal is required to read the password") })
-        (result, _) = await r.remove(app, items: mac.items(app), owner: 0)
-        XCTAssertTrue(result.removed)
-        XCTAssertFalse(result.viaHomebrew)
-        XCTAssertEqual(mac.trashContents(), ["Brewed.app", "com.example.brewed"])
-    }
-
-    func testHomebrewSuccessCountsWhatZapRemoved() async throws {
-        let mac = try FakeMac()
-        let path = try mac.app("Brewed", id: "com.example.brewed")
-        let cache = try mac.file(mac.lib("Caches/com.example.brewed"))
-        var app = info(mac, path)
-        app.source = "Homebrew"
-        app.uninstallName = "brewed"
-        let r = mac.remover(tool: { _, _, _ in
-            // Stands in for brew: removes the app (zap left the cache behind).
-            try? FileManager.default.removeItem(atPath: path)
-            return .init(status: 0, output: "")
-        })
-        let (result, _) = await r.remove(app, items: mac.items(app), owner: 0)
-        XCTAssertTrue(result.viaHomebrew)
-        XCTAssertTrue(result.removed)
-        XCTAssertEqual(result.freed, 2)
-        XCTAssertFalse(FileManager.default.fileExists(atPath: cache))   // trashed natively
-        XCTAssertEqual(mac.trashContents(), ["com.example.brewed"])
-    }
-
-    func testPrivacyBlockedItemsNeedFullDiskAccessAndTheRestContinues() async throws {
+    func testPrivacyBlockedItemsAreLeftBehindAndTheRestContinues() async throws {
         let mac = try FakeMac()
         let path = try mac.app("Boxed", id: "com.example.boxed")
         let container = try mac.file(mac.lib("Containers/com.example.boxed/Data/x"))
@@ -511,14 +481,13 @@ final class AppRemovalTests: XCTestCase {
                                                    userInfo: [NSUnderlyingErrorKey: NSError(domain: NSPOSIXErrorDomain, code: Int(code))]) }
             if p == containerDir { throw posix(EPERM) }   // TCC: "Operation not permitted"
             if p == owned { throw posix(EACCES) }          // root-owned: admin can fix
-            try fake(p)
+            return try fake(p)
         }
         let me = r.uid
         r.ownerUID = { $0 == owned ? 0 : me }
         let (result, pending) = await r.remove(app, items: mac.items(app), owner: 0)
         XCTAssertTrue(result.removed)
-        XCTAssertEqual(result.blockedByPrivacy, [containerDir])
-        XCTAssertEqual(result.problems, [])
+        XCTAssertEqual(result.leftBehind, [LeftBehind(path: containerDir, reason: AppRemover.protectedReason)])
         XCTAssertEqual(pending.map(\.item.path), [owned])
         XCTAssertEqual(mac.trashContents(), ["Boxed.app", "com.example.boxed.plist"])
     }
@@ -535,11 +504,11 @@ final class AppRemovalTests: XCTestCase {
         let fake = mac.fakeTrash
         r.trash = { p in
             if p == containerDir { throw NSError(domain: NSCocoaErrorDomain, code: NSFileWriteNoPermissionError) }
-            try fake(p)
+            return try fake(p)
         }
         let (result, pending) = await r.remove(app, items: mac.items(app), owner: 0)
         XCTAssertTrue(result.removed)
-        XCTAssertEqual(result.blockedByPrivacy, [containerDir])
+        XCTAssertEqual(result.leftBehind.map(\.path), [containerDir])
         XCTAssertEqual(pending, [])
     }
 
@@ -554,21 +523,39 @@ final class AppRemovalTests: XCTestCase {
         XCTAssertNil(AppRemover.blockedKind(NSError(domain: NSCocoaErrorDomain, code: NSFileNoSuchFileError)))
     }
 
-    @MainActor func testModelWithoutFullDiskAccessLeavesContainerSizesUnknown() async throws {
+    @MainActor func testWithoutFullDiskAccessContainersAreProtectedUncountedAndNeverTrashed() async throws {
         let mac = try FakeMac()
         let path = try mac.app("Boxed", id: "com.example.boxed")
-        try mac.file(mac.lib("Containers/com.example.boxed/Data/big"), String(repeating: "x", count: 50_000))
+        let container = mac.lib("Containers/com.example.boxed")
+        let group = mac.lib("Group Containers/group.com.example.boxed")
+        try mac.file(container + "/Data/big", String(repeating: "x", count: 50_000))
+        try mac.file(group + "/big", String(repeating: "x", count: 50_000))
         try mac.file(mac.lib("Caches/com.example.boxed"))
-        let m = UninstallModel(roots: mac.roots, remover: mac.remover(), checkFullDiskAccess: { false })
+        let attempted = Recorder()
+        var r = mac.remover()
+        let fake = mac.fakeTrash
+        r.trash = { p in
+            Task { await attempted.add(p) }
+            return try fake(p)
+        }
+        let m = UninstallModel(roots: mac.roots, remover: r, checkFullDiskAccess: { false })
         await m.load()
         let app = try XCTUnwrap(m.apps.first { $0.path == path })
         await m.sizeLeftovers(app, userInitiated: true)
         let items = try XCTUnwrap(m.leftovers[app.id])
-        let container = try XCTUnwrap(items.first { $0.isContainer })
-        XCTAssertTrue(container.sizeUnknown)
-        XCTAssertNil(container.bytes)
-        XCTAssertNotNil(m.leftoverBytes(app))
-        XCTAssertLessThan(m.leftoverBytes(app) ?? 1e9, 50_000)
+        XCTAssertEqual(Set(items.filter(\.isProtected).map(\.path)), [container, group])
+        XCTAssertTrue(items.filter(\.isProtected).allSatisfy { $0.bytes == nil })
+        XCTAssertLessThan(try XCTUnwrap(m.leftoverBytes(app)), 50_000)
+
+        m.selected = [app.id]
+        await m.removeSelected()
+        try await Task.sleep(for: .milliseconds(50))
+        let tried = await attempted.all
+        XCTAssertFalse(tried.contains(container) || tried.contains(group), "\(tried)")
+        XCTAssertTrue(AppLeftovers.exists(container))
+        XCTAssertTrue(AppLeftovers.exists(group))
+        XCTAssertEqual(m.toast?.leftBehind, [])
+        XCTAssertEqual(mac.trashContents(), ["Boxed.app", "com.example.boxed"])
     }
 
     func testAdminCancelledLeavesItemsAndReportsThem() async throws {
@@ -578,18 +565,63 @@ final class AppRemovalTests: XCTestCase {
         let outcome = await r.removeWithAdmin([PendingAdmin(owner: 0, item: RemovalItem(path: daemon, bytes: 1, isSystem: true))], prompt: "p")
         XCTAssertTrue(outcome.cancelled)
         XCTAssertEqual(outcome.removed, [])
+        XCTAssertEqual(outcome.moved, [:])
         XCTAssertTrue(FileManager.default.fileExists(atPath: daemon))
     }
 
-    @MainActor func testModelRemovesRowsAndSummarizes() async throws {
+    func testAdminScriptReportsWhereEachItemLanded() async throws {
+        let mac = try FakeMac()
+        let odd = try mac.file(mac.sys("Application Support/Foo Bar's \"x\" $HOME `id`"))
+        let daemon = try mac.file(mac.sys("LaunchDaemons/com.example.x.plist"))
+        let helper = try mac.file(mac.sys("PrivilegedHelperTools/com.example.x.helper"))
+        try mac.file(mac.roots.trash + "/Foo Bar's \"x\" $HOME `id`")
+        try mac.file(mac.roots.trash + "/com.example.x.plist")
+        try mac.file(mac.roots.trash + "/com.example.x 2.plist")
+        let r = mac.remover()
+        let script = r.adminScript([RemovalItem(path: daemon, bytes: 1, isSystem: true)])
+        XCTAssertFalse(script.contains("chown -R") || script.contains("chown -hR") || script.contains("-R "), script)
+
+        let pending = [odd, daemon, helper].map { PendingAdmin(owner: 0, item: RemovalItem(path: $0, bytes: 1, isSystem: true)) }
+        let outcome = await r.removeWithAdmin(pending, prompt: "p")
+        let t = mac.roots.trash
+        XCTAssertEqual(outcome.moved, [
+            odd: t + "/Foo Bar's \"x\" $HOME `id` 2",
+            daemon: t + "/com.example.x 3.plist",
+            helper: t + "/com.example.x.helper",
+        ])
+        for dest in outcome.moved.values { XCTAssertTrue(AppLeftovers.exists(dest), dest) }
+
+        // Output through osascript may end lines in "\r"; sudo trims and may add noise.
+        let items = [RemovalItem(path: "/L/a b.plist", bytes: 0), RemovalItem(path: "/L/c", bytes: 0)]
+        XCTAssertEqual(AppRemover.parseAdminMoves("moved 0 1\r\nPassword:\nmoved 1 4\nmoved 7 1\nmoved 1 0\n", items: items, trash: "/T"),
+                       ["/L/a b.plist": "/T/a b.plist", "/L/c": "/T/c 4"])
+    }
+
+    func testRestoreNeverOverwritesAndChecksRoots() throws {
+        let mac = try FakeMac()
+        let original = mac.lib("Caches/com.example.r")
+        let trashed = try mac.file(mac.roots.trash + "/com.example.r", "old")
+        let outside = try mac.file(mac.roots.trash + "/notes", "mine")
+        try mac.file(original, "new")
+        let failed = AppRemover.restore([
+            TrashedItem(original: original, trashed: trashed, kind: .leftover, appName: "R"),
+            TrashedItem(original: mac.base + "/home/Documents/notes", trashed: outside, kind: .leftover, appName: "R"),
+        ], roots: mac.roots)
+        XCTAssertEqual(failed.map(\.path), [trashed, outside])
+        XCTAssertEqual(try String(contentsOfFile: original, encoding: .utf8), "new")
+        XCTAssertTrue(AppLeftovers.exists(trashed))
+        XCTAssertFalse(AppLeftovers.exists(mac.base + "/home/Documents/notes"))
+    }
+
+    @MainActor func testModelRemovesRowsAndShowsAToast() async throws {
         let mac = try FakeMac()
         try mac.app("Alpha", id: "com.example.alpha", bytes: 4096)
         try mac.app("Beta", id: "com.example.beta", bytes: 4096)
         try mac.file(mac.lib("Caches/com.example.alpha"))
-        try mac.file(mac.sys("LaunchDaemons/com.example.beta.plist"))
+        let daemon = try mac.file(mac.sys("LaunchDaemons/com.example.beta.plist"))
         let defaults = UserDefaults(suiteName: "BubbleTests.\(UUID().uuidString)")!
         let m = UninstallModel(roots: mac.roots, remover: mac.remover(admin: { _, _ in throw Admin.Failure.cancelled }),
-                               historyDefaults: defaults)
+                               checkFullDiskAccess: { true }, historyDefaults: defaults)
         await m.load()
         XCTAssertEqual(Set(m.apps.map(\.name)), ["Alpha", "Beta"])
         XCTAssertTrue(m.apps.allSatisfy(\.sized))
@@ -598,13 +630,97 @@ final class AppRemovalTests: XCTestCase {
         await m.removeSelected()
         // Beta's app went to the Trash, but its daemon needed admin rights, which were cancelled.
         XCTAssertEqual(m.apps.map(\.name), [])
-        XCTAssertEqual(Set(m.summary?.removed ?? []), ["Alpha", "Beta"])
         XCTAssertEqual(HistoryTotals.uninstallCount(defaults: defaults), 2)
-        XCTAssertEqual(m.summary?.failures.count, 1)
-        XCTAssertTrue(m.summary?.movedToTrash == true)
-        XCTAssertGreaterThan(m.summary?.freed ?? 0, 0)
+        let toast = try XCTUnwrap(m.toast)
+        XCTAssertTrue(toast.message.hasPrefix("Moved 2 apps to the Trash · "), toast.message)
+        XCTAssertEqual(toast.leftBehind.map(\.path), [daemon])
+        XCTAssertEqual(toast.leftBehindClause, "1 item left behind")
+        XCTAssertFalse(toast.leftBehindDetails.isEmpty)
+        XCTAssertEqual(toast.restorable.count, 3)
         XCTAssertFalse(m.removing)
-        XCTAssertTrue(FileManager.default.fileExists(atPath: mac.sys("LaunchDaemons/com.example.beta.plist")))
+        XCTAssertFalse(m.loading)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: daemon))
+    }
+
+    @MainActor func testUndoPutsBackWhatWasTrashedButNeverOverwrites() async throws {
+        let mac = try FakeMac()
+        let alpha = try mac.app("Alpha", id: "com.example.alpha", bytes: 4096)
+        let cache = try mac.file(mac.lib("Caches/com.example.alpha"), "old")
+        let prefs = try mac.file(mac.lib("Preferences/com.example.alpha.plist"))
+        let daemon = try mac.file(mac.sys("LaunchDaemons/com.example.alpha.plist"))
+        let m = UninstallModel(roots: mac.roots, remover: mac.remover(), checkFullDiskAccess: { true },
+                               historyDefaults: UserDefaults(suiteName: "BubbleTests.\(UUID().uuidString)")!)
+        await m.load()
+        m.selected = Set(m.apps.map(\.id))
+        await m.removeSelected()
+        let removed = try XCTUnwrap(m.toast)
+        XCTAssertEqual(removed.adminMoved, 1)
+        XCTAssertEqual(Set(removed.restorable.map(\.original)), [alpha, cache, prefs])
+        XCTAssertFalse(AppLeftovers.exists(daemon))
+
+        try mac.file(cache, "new")   // the app made a fresh cache in the meantime
+        await m.undo()
+        XCTAssertTrue(AppLeftovers.exists(alpha))
+        XCTAssertTrue(AppLeftovers.exists(prefs))
+        XCTAssertEqual(try String(contentsOfFile: cache, encoding: .utf8), "new")
+        XCTAssertFalse(AppLeftovers.exists(daemon))
+        // The cache that wasn't overwritten, and the daemon moved with admin rights.
+        XCTAssertEqual(mac.trashContents(), ["com.example.alpha", "com.example.alpha 2.plist"])
+        let restored = try XCTUnwrap(m.toast)
+        XCTAssertEqual(restored.message, "Restored Alpha · Some system files stay in the Trash")
+        XCTAssertEqual(restored.leftBehindClause, "1 item still in the Trash")
+        XCTAssertTrue(restored.restorable.isEmpty)
+        XCTAssertEqual(m.apps.map(\.path), [alpha])
+    }
+
+    /// Homebrew apps go to the Trash like any other; Homebrew's record of the cask (and its
+    /// command-line links) follow, so Homebrew stops tracking it. Nothing calls brew.
+    @MainActor func testHomebrewAppGoesToTheTrashAndHomebrewForgetsIt() async throws {
+        let mac = try FakeMac()
+        let fm = FileManager.default
+        let path = try mac.app("Brewed", id: "com.example.brewed")
+        let cache = try mac.file(mac.lib("Caches/com.example.brewed"))
+        let record = mac.base + "/Caskroom/brewed"
+        try mac.file(record + "/1.0/brewed-cli")
+        try fm.createSymbolicLink(atPath: record + "/1.0/Brewed.app", withDestinationPath: path)
+        try fm.createDirectory(atPath: mac.base + "/bin", withIntermediateDirectories: true)
+        let link = mac.base + "/bin/brewed"
+        try fm.createSymbolicLink(atPath: link, withDestinationPath: "../Caskroom/brewed/1.0/brewed-cli")
+        try mac.file(mac.base + "/Caskroom/brewedpro/1.0/x")
+        try fm.createSymbolicLink(atPath: mac.base + "/bin/brewedpro", withDestinationPath: mac.base + "/Caskroom/brewedpro/1.0/x")
+
+        let calls = Recorder()
+        let r = mac.remover(tool: { exe, args, _ in
+            await calls.add(([exe] + args).joined(separator: " "))
+            return .init(status: 0, output: "")
+        })
+        let m = UninstallModel(roots: mac.roots, remover: r, checkFullDiskAccess: { true },
+                               historyDefaults: UserDefaults(suiteName: "BubbleTests.\(UUID().uuidString)")!)
+        await m.load()
+        let app = try XCTUnwrap(m.apps.first { $0.path == path })
+        XCTAssertTrue(app.isBrew)
+        m.selected = [app.id]
+        await m.removeSelected()
+        let log = await calls.all
+        XCTAssertEqual(log, [])
+        XCTAssertEqual(mac.trashContents(), ["Brewed.app", "brewed", "brewed 2", "com.example.brewed"])
+        XCTAssertTrue(AppLeftovers.exists(mac.base + "/bin/brewedpro"))
+        XCTAssertTrue(AppLeftovers.exists(mac.base + "/Caskroom/brewedpro"))
+        let toast = try XCTUnwrap(m.toast)
+        XCTAssertTrue(toast.message.hasPrefix("Moved Brewed to the Trash"), toast.message)
+        XCTAssertTrue(toast.message.hasSuffix("Homebrew no longer tracks it"), toast.message)
+        XCTAssertEqual(Set(toast.restorable.map(\.original)), [path, cache, record, link])
+
+        await m.undo()
+        for p in [path, cache, record, link] { XCTAssertTrue(AppLeftovers.exists(p), p) }
+        XCTAssertEqual(try fm.destinationOfSymbolicLink(atPath: link), "../Caskroom/brewed/1.0/brewed-cli")
+        XCTAssertEqual(m.toast?.message, "Restored Brewed")
+        XCTAssertEqual(m.apps.first { $0.path == path }?.isBrew, true)
+    }
+
+    func testCaskTokensCantLeaveTheCaskroom() {
+        XCTAssertTrue(AppRemover.isSafeCaskToken("visual-studio-code@insiders"))
+        for bad in ["", ".", "..", "-rf", "a/b", "A", "a b"] { XCTAssertFalse(AppRemover.isSafeCaskToken(bad), bad) }
     }
 }
 

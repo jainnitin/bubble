@@ -8,7 +8,6 @@ struct AppInfo: Identifiable, Hashable, Sendable {
     var source: String          // "Homebrew", "App Store" or "App"
     var uninstallName: String   // the Homebrew cask token, or "" when no cask manages the app
     var path: String
-    var sizeText: String
     var bytes: Double
     var version: String
     var lastUsed: Date?
@@ -18,7 +17,7 @@ struct AppInfo: Identifiable, Hashable, Sendable {
     var sized = true
     var id: String { path }
 
-    var isAppStore: Bool { FileManager.default.fileExists(atPath: path + "/Contents/_MASReceipt/receipt") }
+    var isAppStore: Bool { source == "App Store" }
     var sparkleFeed: String? { (Bundle(path: path)?.infoDictionary?["SUFeedURL"] as? String).flatMap { $0.isEmpty ? nil : $0 } }
     var isBrew: Bool { source == "Homebrew" && !uninstallName.isEmpty }
     var identity: AppIdentity { AppIdentity(name: name, path: path, bundleId: bundleId) }
@@ -31,15 +30,50 @@ struct AppInfo: Identifiable, Hashable, Sendable {
     }
 }
 
-/// The outcome of the last removal, shown as a banner above the list.
-struct RemovalSummary: Equatable {
-    var removed: [String] = []
-    var freed: Double = 0
-    var failures: [String] = []
-    var viaHomebrew: [String] = []
-    var movedToTrash = false
-    /// Some app data was left because Bubble lacks Full Disk Access.
-    var needsFullDiskAccess = false
+/// The outcome of a removal or an Undo, shown briefly over the bottom of the list.
+struct RemovalToast: Identifiable, Equatable {
+    let id = UUID()
+    var message: String
+    /// What Undo puts back; empty when there's nothing to restore.
+    var restorable: [TrashedItem] = []
+    /// System files moved with admin rights. They stay in the Trash on Undo.
+    var adminMoved = 0
+    var leftBehind: [LeftBehind] = []
+    var leftBehindWhere = "left behind"
+
+    var leftBehindClause: String? {
+        let n = leftBehind.count
+        return n == 0 ? nil : "\(n) item\(n == 1 ? "" : "s") \(leftBehindWhere)"
+    }
+    var leftBehindDetails: String {
+        leftBehind.map { "\(Fmt.abbreviate($0.path)): \($0.reason)" }.joined(separator: "\n")
+    }
+    var announcement: String { [message, leftBehindClause].compactMap { $0 }.joined(separator: ". ") }
+
+    static func removal(_ results: [AppRemovalResult], adminMoved: Int) -> RemovalToast {
+        let removed = results.filter(\.removed)
+        var message = "Nothing was removed"
+        if !removed.isEmpty {
+            message = "Moved \(removed.count == 1 ? removed[0].app.name : "\(removed.count) apps") to the Trash"
+            let freed = results.reduce(0) { $0 + $1.freed }
+            if freed > 0 { message += " · " + Fmt.bytes(freed) }
+            let untracked = removed.filter(\.untrackedCask).count
+            if untracked > 0 {
+                message += " · Homebrew no longer tracks " + (untracked == removed.count ? (untracked == 1 ? "it" : "them") : "\(untracked) of them")
+            }
+        }
+        return RemovalToast(message: message, restorable: results.flatMap(\.trashed), adminMoved: adminMoved,
+                            leftBehind: results.flatMap(\.leftBehind))
+    }
+
+    static func restored(_ items: [TrashedItem], failed: [LeftBehind], adminMoved: Int) -> RemovalToast {
+        let notBack = Set(failed.map(\.path))
+        var names: [String] = []
+        for item in items where !notBack.contains(item.trashed) && !names.contains(item.appName) { names.append(item.appName) }
+        var message = names.isEmpty ? "Nothing was restored" : "Restored \(names.count == 1 ? names[0] : "\(names.count) apps")"
+        if adminMoved > 0 { message += " · Some system files stay in the Trash" }
+        return RemovalToast(message: message, leftBehind: failed, leftBehindWhere: "still in the Trash")
+    }
 }
 
 /// App sizes from earlier runs, reused while an app's Info.plist is unchanged so the list
@@ -79,7 +113,7 @@ final class UninstallModel {
     var progress: Progress?
     /// Rows with a spinner while their app is removed.
     var removingIds: Set<String> = []
-    var summary: RemovalSummary?
+    var toast: RemovalToast?
 
     @ObservationIgnored let roots: AppRoots
     @ObservationIgnored var remover: AppRemover
@@ -90,12 +124,12 @@ final class UninstallModel {
     /// Without Full Disk Access, Containers and Group Containers are only probed by exact
     /// path and never measured, so macOS never asks "access data from other apps".
     @ObservationIgnored private(set) var fullDiskAccess = false
-    @ObservationIgnored let checkFullDiskAccess: @Sendable () -> Bool
+    @ObservationIgnored let checkFullDiskAccess: @MainActor () -> Bool
     /// Where removed apps are counted for the menu bar's Uninstalled total.
     @ObservationIgnored let historyDefaults: UserDefaults
 
     init(roots: AppRoots = .live, remover: AppRemover? = nil,
-         checkFullDiskAccess: @escaping @Sendable () -> Bool = { SystemSettings.hasFullDiskAccess },
+         checkFullDiskAccess: @escaping @MainActor () -> Bool = { MoleInstall.hasFullDiskAccess },
          historyDefaults: UserDefaults = .standard) {
         self.roots = roots
         self.remover = remover ?? AppRemover(roots: roots)
@@ -132,16 +166,15 @@ final class UninstallModel {
         loading = true
         let roots = roots
         let cache = AppSizeCache.load()
-        let check = checkFullDiskAccess
-        let (scan, found, fda) = await Task.detached(priority: .userInitiated) {
-            let fda = check()
+        let fda = checkFullDiskAccess()
+        let (scan, found) = await Task.detached(priority: .userInitiated) {
             let scan = AppScanner.scan(roots, cache: cache)
             let index = LeftoverIndex.read(roots, fullDiskAccess: fda)
             var found: [String: [Leftover]] = [:]
             for app in scan.apps {
                 found[app.id] = AppLeftovers.discover(app.identity, others: scan.identities, index: index, roots: roots)
             }
-            return (scan, found, fda)
+            return (scan, found)
         }.value
         guard gen == generation else { return }
         fullDiskAccess = fda
@@ -177,7 +210,7 @@ final class UninstallModel {
             merged[id] = items.map { item in
                 var l = item
                 l.bytes = known[l.path] ?? nil
-                l.sizeUnknown = !fullDiskAccess && l.isContainer
+                l.isProtected = !fullDiskAccess && l.isContainer
                 return l
             }
         }
@@ -246,7 +279,7 @@ final class UninstallModel {
     /// Measures the app's unsized leftovers. Containers are never read without Full Disk
     /// Access (they're marked "size unknown" instead).
     func sizeLeftovers(_ app: AppInfo, userInitiated: Bool) async {
-        let todo = (leftovers[app.id] ?? []).filter { $0.bytes == nil && !$0.sizeUnknown }.map(\.path)
+        let todo = (leftovers[app.id] ?? []).filter { $0.bytes == nil && !$0.isProtected }.map(\.path)
         guard !todo.isEmpty, !sizingLeftovers.contains(app.id) else { return }
         if userInitiated { sizingLeftovers.insert(app.id) }
         defer { if userInitiated { sizingLeftovers.remove(app.id) } }
@@ -279,7 +312,7 @@ final class UninstallModel {
     func leftoverBytes(_ app: AppInfo) -> Double? {
         guard app.sized, let items = leftovers[app.id] else { return nil }
         var total = app.bytes
-        for l in items where !l.sizeUnknown {
+        for l in items where !l.isProtected {
             guard let b = l.bytes else { return nil }
             total += b
         }
@@ -292,8 +325,9 @@ final class UninstallModel {
         let selection = selectedApps
         guard !selection.isEmpty, !removing else { return }
         removing = true
-        summary = nil
+        toast = nil
         generation += 1  // a load in flight must not overwrite the list mid-removal
+        loading = false
         let roots = roots
         let identities = identities
         let known = leftovers
@@ -305,15 +339,14 @@ final class UninstallModel {
         for (i, app) in selection.enumerated() {
             progress = Progress(name: app.name, index: i + 1, total: selection.count)
             removingIds.insert(app.id)
-            // Fresh discovery right before removing, with sizes for the result banner.
+            // Fresh discovery right before removing, with sizes for the result.
             let items = await Task.detached(priority: .userInitiated) { () -> [RemovalItem] in
                 let sizes = Dictionary((known[app.id] ?? []).compactMap { l in l.bytes.map { (l.path, $0) } }, uniquingKeysWith: { a, _ in a })
                 let found = AppLeftovers.discover(app.identity, others: identities, index: index, roots: roots)
                 let appItem = RemovalItem(path: app.path, bytes: app.sized ? app.bytes : AppLeftovers.allocatedSize(app.path), isApp: true)
-                return [appItem] + found.map { l in
-                    // Never read a container's contents without Full Disk Access.
-                    let bytes = sizes[l.path] ?? (!fda && l.isContainer ? 0 : AppLeftovers.allocatedSize(l.path))
-                    return RemovalItem(path: l.path, bytes: bytes, isSystem: l.isSystem)
+                // Containers macOS protects without Full Disk Access are never attempted.
+                return [appItem] + found.filter { fda || !$0.isContainer }.map { l in
+                    RemovalItem(path: l.path, bytes: sizes[l.path] ?? AppLeftovers.allocatedSize(l.path), isSystem: l.isSystem)
                 }
             }.value
             let (result, needAdmin) = await remover.remove(app, items: items, owner: i)
@@ -322,6 +355,7 @@ final class UninstallModel {
             if needAdmin.isEmpty { removingIds.remove(app.id) }
         }
 
+        var adminMoved = 0
         if !pending.isEmpty {
             let owners = Array(Set(pending.map(\.owner))).sorted()
             progress = Progress(name: owners.count == 1 ? selection[owners[0]].name : "\(owners.count) apps",
@@ -330,37 +364,24 @@ final class UninstallModel {
                 ? "Bubble needs permission to remove “\(selection[owners[0]].name)” and its system files."
                 : "Bubble needs permission to remove \(owners.count) apps and their system files."
             let outcome = await remover.removeWithAdmin(pending, prompt: prompt)
-            var notRemoved: [Int: Int] = [:]
+            adminMoved = outcome.moved.count
+            let why = outcome.cancelled ? "Needs admin permission, which was cancelled." : "Couldn't be moved with admin permission."
             for p in pending {
                 if outcome.removed.contains(p.item.path) {
                     results[p.owner].freed += p.item.bytes
                 } else {
-                    notRemoved[p.owner, default: 0] += 1
+                    results[p.owner].leftBehind.append(LeftBehind(path: p.item.path, reason: why))
                 }
             }
-            for (owner, count) in notRemoved.sorted(by: { $0.key < $1.key }) {
-                let why = outcome.cancelled ? "permission was cancelled" : outcome.error.map { "the admin step failed: \($0)" } ?? "they couldn't be moved"
-                results[owner].problems.append("\(selection[owner].name): \(count) item\(count == 1 ? "" : "s") needing admin rights \(count == 1 ? "was" : "were") not removed (\(why)).")
-            }
         }
-        for i in results.indices { results[i].removed = !AppLeftovers.exists(results[i].app.path) }
+        for i in results.indices {
+            results[i].removed = !AppLeftovers.exists(results[i].app.path)
+            remover.forgetCask(&results[i])
+        }
 
-        var s = RemovalSummary()
-        for r in results {
-            if r.removed { s.removed.append(r.app.name) }
-            if r.viaHomebrew { s.viaHomebrew.append(r.app.name) }
-            if r.freed > 0, !r.viaHomebrew { s.movedToTrash = true }
-            s.freed += r.freed
-            s.failures += r.problems
-            if !r.blockedByPrivacy.isEmpty {
-                let n = r.blockedByPrivacy.count
-                s.failures.append("\(r.app.name): \(n) item\(n == 1 ? "" : "s") of app data need\(n == 1 ? "s" : "") Full Disk Access to remove.")
-                s.needsFullDiskAccess = true
-            }
-        }
-        summary = s
+        toast = RemovalToast.removal(results, adminMoved: adminMoved)
         // Mole's history never sees native removals, so Bubble counts them itself.
-        HistoryTotals.recordUninstall(count: s.removed.count, defaults: historyDefaults)
+        HistoryTotals.recordUninstall(count: results.filter(\.removed).count, defaults: historyDefaults)
 
         let gone = Set(results.filter(\.removed).map(\.app.id))
         apps.removeAll { gone.contains($0.id) }
@@ -382,21 +403,27 @@ final class UninstallModel {
         }.value
         mergeLeftovers(found)
     }
+
+    /// Puts back what the last removal moved to the Trash, then lists the apps again.
+    func undo() async {
+        guard let last = toast, !last.restorable.isEmpty, !removing else { return }
+        toast = nil
+        let roots = roots
+        let items = last.restorable
+        let failed = await Task.detached { AppRemover.restore(items, roots: roots) }.value
+        toast = RemovalToast.restored(items, failed: failed, adminMoved: last.adminMoved)
+        await load()
+    }
 }
 
 // MARK: - View
 
 struct UninstallList: View {
     @Bindable var model: UninstallModel
-    @State private var confirm = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         VStack(spacing: 0) {
-            if let s = model.summary {
-                summaryBanner(s)
-                    .padding(.horizontal, Space.gutter).padding(.bottom, Space.m)
-                    .transition(.opacity)
-            }
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 2) {
                     HStack(spacing: Space.s) {
@@ -409,83 +436,54 @@ struct UninstallList: View {
                     .padding(.horizontal, Space.gutter).padding(.bottom, Space.s)
                     ForEach(model.visible) { app in row(app) }
                 }
-                .padding(.bottom, Space.l)
+                .padding(.bottom, model.toast == nil ? Space.l : 72)
+            }
+            .overlay(alignment: .bottom) {
+                if let t = model.toast {
+                    toast(t)
+                        .id(t.id)
+                        .padding(.horizontal, Space.gutter).padding(.bottom, Space.m)
+                        .transition(reduceMotion ? .opacity : .move(edge: .bottom).combined(with: .opacity))
+                }
             }
             if !model.selected.isEmpty || model.removing {
                 bottomBar.transition(.move(edge: .bottom).combined(with: .opacity))
             }
         }
         .motion(model.selected.isEmpty && !model.removing)
-        .motion(model.summary)
-        // Everything goes to the Trash, so removal needs no confirmation, except for
-        // Homebrew apps: brew --zap deletes their files for good.
-        .confirmationDialog("Permanently delete \(brewNames)?", isPresented: $confirm) {
-            Button("Delete", role: .destructive) {
-                Task { await model.removeSelected() }
+        .motion(model.toast?.id)
+    }
+
+    // MARK: Result
+
+    private func toast(_ t: RemovalToast) -> some View {
+        Toast(message: t.message, announcement: t.announcement, onDismiss: { dismiss(t) }) {
+            if let clause = t.leftBehindClause {
+                HStack(spacing: Space.s) {
+                    Text("·").foregroundStyle(Palette.tertiary).accessibilityHidden(true)
+                    Text(clause).font(.num(.body)).foregroundStyle(Palette.amber)
+                    LinkButton(title: "Reveal", color: Palette.accent) { reveal(t) }
+                }
+                .help(t.leftBehindDetails)
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel("\(clause). \(t.leftBehindDetails)")
+                .accessibilityAction(named: "Reveal in Finder") { reveal(t) }
             }
-        } message: {
-            Text("Homebrew removes these apps and their data with brew uninstall --zap, which skips the Trash. Other selected apps go to the Trash.")
+            if !t.restorable.isEmpty {
+                LinkButton(title: "Undo", color: Palette.accent) { Task { await model.undo() } }
+                    .disabled(model.removing)
+                    .help(t.adminMoved > 0 ? "Puts back what Bubble moved to the Trash. System files stay in the Trash." : "Puts back what Bubble moved to the Trash")
+            }
         }
     }
 
-    private var brewNames: String {
-        ListFormatter.localizedString(byJoining: model.selectedApps.filter(\.isBrew).map(\.name))
+    private func reveal(_ t: RemovalToast) {
+        let urls = t.leftBehind.map(\.path).filter(AppLeftovers.exists).map { URL(fileURLWithPath: $0) }
+        if !urls.isEmpty { NSWorkspace.shared.activateFileViewerSelecting(urls) }
     }
 
-    private func remove() {
-        if model.selectedApps.contains(where: \.isBrew) {
-            confirm = true
-        } else {
-            Task { await model.removeSelected() }
-        }
-    }
-
-    // MARK: Result banner
-
-    private func summaryBanner(_ s: RemovalSummary) -> some View {
-        let ok = !s.removed.isEmpty
-        let title: String
-        if ok {
-            let what = s.removed.count == 1 ? s.removed[0] : "\(s.removed.count) apps"
-            title = s.freed > 0 ? "Removed \(what), freed \(Fmt.bytes(s.freed))" : "Removed \(what)"
-        } else {
-            title = "Nothing was removed"
-        }
-        var detail: [String] = []
-        if s.movedToTrash { detail.append("Moved to Trash.") }
-        if !s.viaHomebrew.isEmpty { detail.append("Homebrew removed \(s.viaHomebrew.joined(separator: ", ")).") }
-        return HStack(alignment: .top, spacing: Space.m) {
-            Image(systemName: ok ? "checkmark.circle.fill" : "info.circle.fill")
-                .foregroundStyle(ok ? Palette.green : Palette.secondary)
-            VStack(alignment: .leading, spacing: 4) {
-                Text(title).font(.ui(.body, .semibold))
-                if !detail.isEmpty {
-                    Text(detail.joined(separator: " ")).font(.ui(.secondary)).foregroundStyle(Palette.secondary)
-                }
-                ForEach(s.failures, id: \.self) { f in
-                    Label(f, systemImage: "exclamationmark.triangle")
-                        .font(.ui(.secondary)).foregroundStyle(Palette.amber)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-            }
-            Spacer()
-            if s.needsFullDiskAccess {
-                LinkButton(title: "Open Settings", color: Palette.accent) { SystemSettings.openFullDiskAccess() }
-                    .font(.ui(.secondary, .medium))
-                    .help("Give Bubble Full Disk Access, then remove the app's leftover data")
-            }
-            if s.movedToTrash {
-                LinkButton(title: "Show in Trash", color: Palette.accent) {
-                    NSWorkspace.shared.open(URL(fileURLWithPath: model.roots.trash, isDirectory: true))
-                }
-                .font(.ui(.secondary, .medium))
-            }
-            IconButton(systemName: "xmark", label: "Dismiss") { model.summary = nil }
-        }
-        .padding(Space.m)
-        .panel(radius: Radius.row, fill: ok ? Palette.green.opacity(0.08) : Palette.card,
-               stroke: ok ? Palette.green.opacity(0.25) : Palette.cardStroke)
-        .accessibilityElement(children: .contain)
+    private func dismiss(_ t: RemovalToast) {
+        if model.toast?.id == t.id { model.toast = nil }
     }
 
     // MARK: Rows
@@ -556,13 +554,22 @@ struct UninstallList: View {
             Text("Will be removed").font(.ui(.secondary, .semibold)).foregroundStyle(Palette.secondary)
             if let items = model.leftovers[app.id] {
                 fileRow(kind: "Application", path: app.path, bytes: app.sized ? app.bytes : nil)
-                ForEach(items) { l in fileRow(kind: l.kind, path: l.path, bytes: l.bytes, system: l.isSystem, unknown: l.sizeUnknown) }
+                ForEach(items) { l in fileRow(kind: l.kind, path: l.path, bytes: l.bytes, system: l.isSystem, protected: l.isProtected) }
                 if items.isEmpty {
                     Text("No settings or caches found for this app.").font(.ui(.secondary)).foregroundStyle(Palette.secondary)
                 }
                 if app.isBrew {
-                    Text("Homebrew also removes the files its cask lists (brew uninstall --zap).")
-                        .font(.ui(.secondary)).foregroundStyle(Palette.tertiary)
+                    Text("Homebrew stops tracking this app.").font(.ui(.secondary)).foregroundStyle(Palette.tertiary)
+                }
+                if items.contains(where: \.isProtected) {
+                    HStack(alignment: .firstTextBaseline, spacing: Space.s) {
+                        Text("Bubble can't move protected items. Reveal one in Finder to remove it yourself, or allow Full Disk Access.")
+                            .foregroundStyle(Palette.tertiary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        LinkButton(title: "Allow Full Disk Access", color: Palette.accent) { SystemSettings.openFullDiskAccess() }
+                    }
+                    .font(.ui(.secondary))
+                    .padding(.top, Space.xs)
                 }
             } else {
                 ProgressLine(text: "Finding leftovers")
@@ -572,10 +579,11 @@ struct UninstallList: View {
         .transition(.opacity)
     }
 
-    private func fileRow(kind: String, path: String, bytes: Double?, system: Bool = false, unknown: Bool = false) -> some View {
+    private func fileRow(kind: String, path: String, bytes: Double?, system: Bool = false, protected: Bool = false) -> some View {
         HStack(spacing: Space.l) {
             Text(kind).font(.ui(.secondary, .semibold)).frame(width: 120, alignment: .leading)
-            Text(Fmt.abbreviate(path)).font(.path()).foregroundStyle(.white.opacity(0.75))
+                .foregroundStyle(protected ? Palette.secondary : .primary)
+            Text(Fmt.abbreviate(path)).font(.path()).foregroundStyle(.white.opacity(protected ? 0.45 : 0.75))
                 .lineLimit(1).truncationMode(.middle)
             if system {
                 Image(systemName: "lock.fill").font(.ui(.caption)).foregroundStyle(Palette.tertiary)
@@ -583,9 +591,10 @@ struct UninstallList: View {
                     .accessibilityLabel("Needs admin rights")
             }
             Spacer()
-            if unknown {
-                Text("size unknown").font(.ui(.secondary)).foregroundStyle(Palette.tertiary)
-                    .help("Measuring another app's data needs Full Disk Access")
+            if protected {
+                Label("Protected by macOS", systemImage: "lock")
+                    .font(.ui(.secondary)).foregroundStyle(Palette.secondary)
+                    .help("Bubble can't move this without Full Disk Access, so it stays")
             } else if let bytes {
                 Text(Fmt.bytes(bytes)).font(.num(.secondary)).foregroundStyle(Palette.secondary)
             } else {
@@ -632,7 +641,9 @@ struct UninstallList: View {
                     .contentTransition(.numericText())
                 LinkButton(title: "Clear selection", color: Palette.accent) { model.selected = [] }
                 Spacer()
-                PillButton(title: "Remove \(apps.count) app\(apps.count == 1 ? "" : "s")", width: 240) { remove() }
+                PillButton(title: "Remove \(apps.count) app\(apps.count == 1 ? "" : "s")", width: 240) {
+                    Task { await model.removeSelected() }
+                }
             }
         }
         .padding(.horizontal, Space.gutter).padding(.vertical, Space.m)

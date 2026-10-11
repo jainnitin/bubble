@@ -225,6 +225,41 @@ struct NoticeBar: View {
     }
 }
 
+/// A short result over the bottom of a screen, with a few small actions. VoiceOver reads
+/// it out when it appears. It dismisses itself after `duration` seconds, counted only
+/// while the pointer is elsewhere; give it a new `.id` for each result.
+struct Toast<Actions: View>: View {
+    let message: String
+    var announcement: String?
+    var duration: TimeInterval = 6
+    let onDismiss: () -> Void
+    @ViewBuilder var actions: Actions
+    @State private var hovering = false
+
+    var body: some View {
+        HStack(spacing: Space.m) {
+            Text(message).font(.num(.body)).lineLimit(1).truncationMode(.middle)
+            actions.font(.ui(.body, .medium))
+            IconButton(systemName: "xmark", label: "Dismiss", action: onDismiss)
+        }
+        .padding(.leading, Space.l).padding(.trailing, Space.xs).padding(.vertical, Space.xs)
+        .panel(radius: Radius.row, fill: .regularMaterial)
+        .shadow(color: .black.opacity(0.3), radius: 12, y: 4)
+        .onHover { hovering = $0 }
+        .accessibilityElement(children: .contain)
+        .onAppear { AccessibilityNotification.Announcement(announcement ?? message).post() }
+        .task {
+            var left = duration
+            while left > 0 {
+                try? await Task.sleep(for: .milliseconds(250))
+                if Task.isCancelled { return }
+                if !hovering { left -= 0.25 }
+            }
+            onDismiss()
+        }
+    }
+}
+
 /// A spinner with the step that's running.
 struct ProgressLine: View {
     let text: String
