@@ -7,23 +7,46 @@ struct GeneralPane: View {
     @AppStorage("menuBarOnly") private var menuBarOnly = false
     @AppStorage("skipIntro") private var skipIntro = false
     @State private var launchAtLogin = LaunchAtLogin.isOn
-    @State private var fullDiskAccess = SystemSettings.hasFullDiskAccess
+    @State private var access = FullDiskAccess.shared
+    @State private var allowed = PrivacyGuard.allowedFolders
     @State private var error: String?
+
+    private var fullDiskAccess: Bool { access.isOn }
 
     var body: some View {
         VStack(alignment: .leading, spacing: Space.xl) {
-            SettingsGroup(footer: (fullDiskAccess ? ""
-                          : "Turn on Bubble in Privacy & Security, then come back. If it still shows Off, quit and reopen Bubble. ")
-                          + "macOS extends this access to the tools Bubble runs: mo, brew, and developer tools such as npm, pip and go when Clean clears their caches.") {
+            SettingsGroup(footer: fullDiskAccess
+                          ? "macOS extends this access to the tools Bubble runs: mo, brew, and developer tools such as npm, pip and go when Clean clears their caches. Nothing Bubble reads leaves your Mac."
+                          : "Optional. Without it, Clean and Analyze cover everything else and skip the places macOS keeps private, so no permission dialogs pop up mid-scan. Nothing Bubble reads leaves your Mac.") {
                 SettingRow(symbol: "externaldrive.fill.badge.checkmark", tint: Color(hex: 0x4F8CF0), title: "Full Disk Access",
-                           detail: "Lets Bubble and Mole look inside Trash, Mail and other private folders.") {
+                           detail: "Adds Trash, Mail, Desktop, Documents, Downloads and other apps' caches to Clean and Analyze.") {
                     HStack(spacing: Space.s) {
-                        StatusPill(text: fullDiskAccess ? "On" : "Off", color: fullDiskAccess ? Palette.green : Palette.amber)
+                        StatusPill(text: fullDiskAccess ? "On" : "Off", color: fullDiskAccess ? Palette.green : Palette.secondary)
                             .accessibilityLabel("Full Disk Access is \(fullDiskAccess ? "on" : "off")")
                         if !fullDiskAccess {
-                            Button("Open Settings") { SystemSettings.openFullDiskAccess() }
+                            Button("Open Settings") { access.openSettings() }
                         }
-                        IconButton(systemName: "arrow.clockwise", label: "Check again") { fullDiskAccess = SystemSettings.hasFullDiskAccess }
+                        IconButton(systemName: "arrow.clockwise", label: "Check again") { Task { await access.refresh() } }
+                    }
+                }
+                if !fullDiskAccess && access.returnedWithoutGrant {
+                    SettingRow(symbol: "arrow.triangle.2.circlepath", tint: Color(hex: 0x8A8F98), title: "Turned it on already?",
+                               detail: "macOS sometimes applies it only after Bubble restarts.") {
+                        Button("Relaunch Bubble") { AppRelaunch.relaunch() }
+                    }
+                }
+            }
+
+            if !fullDiskAccess && PrivacyGuard.sandboxWorks {
+                SettingsGroup(footer: "Off: Clean and Analyze skip the folder, so macOS doesn't ask. On: macOS asks once, the next time Bubble scans it, and remembers your answer.") {
+                    ForEach(PrivacyGuard.Folder.allCases) { f in
+                        ToggleRow(symbol: symbol(f), tint: Color(hex: 0x4F8CF0), title: "Scan \(f.rawValue)",
+                                  detail: detail(f), isOn: Binding(
+                                    get: { allowed.contains(f) },
+                                    set: { on in
+                                        if on { allowed.insert(f) } else { allowed.remove(f) }
+                                        PrivacyGuard.allowedFolders = allowed
+                                    }))
                     }
                 }
             }
@@ -55,8 +78,25 @@ struct GeneralPane: View {
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
-            fullDiskAccess = SystemSettings.hasFullDiskAccess
+            // Full Disk Access re-checks itself on activation (FullDiskAccess.shared).
             launchAtLogin = LaunchAtLogin.isOn
+            allowed = PrivacyGuard.allowedFolders
+        }
+    }
+
+    private func symbol(_ f: PrivacyGuard.Folder) -> String {
+        switch f {
+        case .desktop: "menubar.dock.rectangle"
+        case .documents: "doc.fill"
+        case .downloads: "arrow.down.circle.fill"
+        }
+    }
+
+    private func detail(_ f: PrivacyGuard.Folder) -> String {
+        switch f {
+        case .desktop: "Project caches, and its size in Analyze."
+        case .documents: "Project caches, and its size in Analyze."
+        case .downloads: "Unfinished browser downloads, and its size in Analyze."
         }
     }
 }

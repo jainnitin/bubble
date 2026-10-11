@@ -143,12 +143,8 @@ final class MoleInstall {
         #endif
     }
 
-    static var hasFullDiskAccess: Bool {
-        #if BUBBLE_DEV
-        if UserDefaults.standard.bool(forKey: "simulateNoFullDiskAccess") { return false }
-        #endif
-        return SystemSettings.hasFullDiskAccess
-    }
+    /// Honors `-simulateNoFullDiskAccess YES` (handled in `SystemSettings.hasFullDiskAccess`).
+    static var hasFullDiskAccess: Bool { SystemSettings.hasFullDiskAccess }
 
     private init() {
         // Synchronous first guess so the window doesn't flash setup when Mole is there;

@@ -29,6 +29,15 @@ struct CleanItem: Identifiable, Hashable {
     var protectPaths: [String] { whitelistPaths ?? [path] }
 }
 
+/// A place a scan or clean didn't look at, and why.
+struct SkippedPlace: Identifiable, Hashable {
+    var name: String
+    var reason: String
+    /// Full Disk Access would let Bubble include it.
+    var needsFullDiskAccess: Bool
+    var id: String { name }
+}
+
 struct CleanCategory: Identifiable {
     var name: String
     var items: [CleanItem]
@@ -91,6 +100,12 @@ final class CleanModel {
     var log: [String] = []
     var needsFullDiskAccess = false
     var needsAdmin = false
+    /// Places the last scan or clean didn't look at: macOS-protected places a guarded run
+    /// skipped on purpose (see `PrivacyGuard`), plus anything Mole itself reported as
+    /// skipped ("Trash · skipped, grant Full Disk Access…").
+    var skipped: [SkippedPlace] = []
+    /// The last scan ran under the privacy guard (no Full Disk Access).
+    var guarded = false
     var freedText = ""
     var error: String?
 
@@ -113,13 +128,16 @@ final class CleanModel {
         // Notices describe this scan only; a rescan after granting access clears them.
         needsFullDiskAccess = false
         needsAdmin = false
+        let profile = PrivacyGuard.currentProfile(quietAppleEvents: true)
+        guarded = profile != nil && profile != PrivacyGuard.appleEventsOnlyProfile
+        skipped = guarded ? PrivacyGuard.cleanSkipped().map { SkippedPlace(name: $0.name, reason: $0.detail, needsFullDiskAccess: true) } : []
         error = nil
         log = []
         toolHits = []
         sectionOrder = []
         currentStep = "Starting"
         job = Task {
-            for await line in Shell.moLines(["clean", "--dry-run"]) {
+            for await line in Shell.moLines(["clean", "--dry-run"], sandbox: profile) {
                 ingest(line)
                 if let hit = Self.parseToolLine(line) {
                     toolHits.append(ToolHit(section: currentStep, name: hit.name, sizeText: hit.sizeText))
@@ -178,13 +196,15 @@ final class CleanModel {
         phase = .cleaning
         needsFullDiskAccess = false
         needsAdmin = false
+        // Guarded the same way as the scan, so a clean never reaches what the review didn't show.
+        let profile = PrivacyGuard.currentProfile(quietAppleEvents: true)
         reviewing = false
         log = []
         currentStep = "Starting"
         let before = VolumeInfo.root.used
         job = Task {
             var tracked: String?
-            for await line in Shell.moLines(["clean"]) {
+            for await line in Shell.moLines(["clean"], sandbox: profile) {
                 ingest(line)
                 if let r = line.range(of: "Tracked cleanup:") {
                     // "Tracked cleanup: 5.1MB | Items cleaned: 1" -> "5.1MB"
@@ -228,7 +248,39 @@ final class CleanModel {
             if !sectionOrder.contains(currentStep) { sectionOrder.append(currentStep) }
         }
         if line.contains("Full Disk Access") { needsFullDiskAccess = true }
+        if let s = Self.parseSkipLine(line), !skipped.contains(where: { $0.name.caseInsensitiveCompare(s.name) == .orderedSame }) {
+            skipped.append(s)
+        }
         if line.contains("need sudo") || line.contains("requires sudo") { needsAdmin = true }
+    }
+
+    // MARK: Skipped places
+
+    /// Mole's own "skipped" lines, e.g.
+    ///   "◎ Trash · skipped, grant Full Disk Access to your terminal"
+    ///   "◎ Xcode DerivedData · skipped (process state unknown)"
+    ///   "! Time Machine cleanup · skipped (backup in progress)"
+    ///   "◎ Project caches · skipped 2 slow/incomplete roots"
+    /// Whitelist skips ("Homebrew · skipped (whitelist)") are the user's own choice and
+    /// aren't reported.
+    nonisolated static func parseSkipLine(_ raw: String) -> SkippedPlace? {
+        var line = raw.trimmingCharacters(in: .whitespaces)
+        // Drop a leading status glyph ("◎", "!", "⚠"…).
+        if let first = line.unicodeScalars.first, !CharacterSet.alphanumerics.contains(first),
+           let space = line.firstIndex(of: " ") {
+            line = line[line.index(after: space)...].trimmingCharacters(in: .whitespaces)
+        }
+        guard let sep = line.range(of: " · skipped") else { return nil }
+        let name = line[..<sep.lowerBound].trimmingCharacters(in: .whitespaces)
+        var reason = line[sep.upperBound...].trimmingCharacters(in: .whitespaces)
+        guard !name.isEmpty, !name.contains("·") else { return nil }
+        if reason.hasPrefix(",") { reason = reason.dropFirst().trimmingCharacters(in: .whitespaces) }
+        if reason.hasPrefix("("), reason.hasSuffix(")") { reason = String(reason.dropFirst().dropLast()) }
+        if reason == "whitelist" { return nil }
+        let fda = reason.localizedCaseInsensitiveContains("Full Disk Access")
+        // Mole speaks to Terminal users ("grant Full Disk Access to your terminal").
+        let shown = fda ? "Protected by macOS" : (reason.isEmpty ? "Skipped" : reason.prefix(1).uppercased() + reason.dropFirst())
+        return SkippedPlace(name: name, reason: shown, needsFullDiskAccess: fda)
     }
 
     // MARK: Selection

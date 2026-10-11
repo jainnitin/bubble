@@ -2,10 +2,20 @@ import SwiftUI
 
 struct CleanView: View {
     @State private var model = CleanModel()
-    @State private var hideFDA = false
+    @State private var access = FullDiskAccess.shared
+    /// The Full Disk Access notice is shown once per kind of result, then stays dismissed.
+    @AppStorage("cleanAccessNoticeDismissed") private var noticeDismissed = false
     @State private var shownBytes: Double = 0
     @State private var showFoundAction = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    /// The scan skipped places Full Disk Access would add, and the user hasn't waved the notice off.
+    private var showAccessNotice: Bool {
+        let missed = model.needsFullDiskAccess || model.skipped.contains(where: \.needsFullDiskAccess)
+        guard missed, !model.reviewing, model.phase == .found || model.phase == .done else { return false }
+        // Access arrived since the scan: say so whether or not the ask was dismissed.
+        return access.isOn || !noticeDismissed
+    }
 
     var body: some View {
         ZStack(alignment: .bottom) {
@@ -15,15 +25,14 @@ struct CleanView: View {
             } else {
                 hero.transition(.opacity)
             }
-            if model.needsFullDiskAccess && !hideFDA && !model.reviewing {
-                NoticeBar(icon: "lock.shield", text: "Give Bubble Full Disk Access to scan Trash, Mail and other protected caches.",
-                          actionTitle: "Open Settings", action: SystemSettings.openFullDiskAccess, onClose: { hideFDA = true })
+            if showAccessNotice {
+                accessNotice
                     .padding(.horizontal, Space.gutter).padding(.bottom, Space.l)
                     .transition(.move(edge: .bottom).combined(with: .opacity))
             }
         }
         .motion(model.reviewing)
-        .motion(model.needsFullDiskAccess && !hideFDA)
+        .motion(showAccessNotice)
         .sensoryFeedback(.success, trigger: model.phase == .done)
         .task {
             #if BUBBLE_DEV
@@ -41,6 +50,29 @@ struct CleanView: View {
         .alert("Can't skip unchecked items", isPresented: Binding(get: { model.error != nil }, set: { if !$0 { model.error = nil } })) {
             Button("OK") { model.error = nil }
         } message: { Text(model.error ?? "") }
+    }
+
+    @ViewBuilder
+    private var accessNotice: some View {
+        if access.isOn {
+            NoticeBar(icon: "lock.open", text: "Full Disk Access is on. Scan again to include Trash, Mail and the other places this scan skipped.",
+                      actionTitle: "Scan again", action: { model.scan() })
+        } else {
+            NoticeBar(icon: "lock.shield",
+                      text: "Skipped \(Self.skippedSummary(model.skipped)): macOS keeps them private. Everything else was scanned.",
+                      actionTitle: "Allow Access…", action: { access.openSettings() }, onClose: { noticeDismissed = true })
+        }
+    }
+
+    /// "Trash, Mail and 3 more places".
+    static func skippedSummary(_ places: [SkippedPlace]) -> String {
+        let names = places.filter(\.needsFullDiskAccess).map(\.name)
+        switch names.count {
+        case 0: return "protected places"
+        case 1: return names[0]
+        case 2: return "\(names[0]) and \(names[1])"
+        default: return "\(names[0]), \(names[1]) and \(names.count - 2) more"
+        }
     }
 
     private var hero: some View {
@@ -82,6 +114,10 @@ struct CleanView: View {
                     LinkButton(title: "Scan again", color: Palette.accent) { model.scan() }
                 }
                 .font(.ui(.body))
+                if model.guarded {
+                    // Honest totals: say what wasn't counted, even after the notice is dismissed.
+                    Hint(icon: "lock", text: "Not counted: \(Self.skippedSummary(model.skipped)), which macOS keeps private.")
+                }
                 PillButton(title: "Review and choose") { model.reviewing = true }
                     .padding(.top, Space.s)
                     .opacity(showFoundAction ? 1 : 0)
@@ -129,6 +165,7 @@ struct CleanReview: View {
             ScrollView {
                 VStack(spacing: Space.s) {
                     ForEach(model.categories) { c in category(c) }
+                    if !model.skipped.isEmpty { SkippedPanel(places: model.skipped) }
                 }
                 .padding(.bottom, Space.m)
             }
@@ -248,5 +285,45 @@ struct CleanReview: View {
         .panel(radius: Radius.row)
         .motion(open)
         .motion(sel)
+    }
+}
+
+/// "Not scanned" at the end of the review: what this scan left out and why, so a
+/// smaller total without Full Disk Access reads as a choice, not a mystery.
+struct SkippedPanel: View {
+    let places: [SkippedPlace]
+    @State private var access = FullDiskAccess.shared
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Space.s) {
+            HStack(spacing: Space.s) {
+                Image(systemName: "lock").foregroundStyle(Palette.tertiary).accessibilityHidden(true)
+                Text("Not scanned").font(.ui(.body, .semibold))
+                Text("\(places.count)").font(.num(.secondary)).foregroundStyle(Palette.tertiary)
+                Spacer()
+                if places.contains(where: \.needsFullDiskAccess) && !access.isOn {
+                    LinkButton(title: "Allow Full Disk Access…", color: Palette.accent) { access.openSettings() }
+                        .font(.ui(.secondary, .medium))
+                }
+            }
+            ForEach(places) { p in
+                HStack(alignment: .firstTextBaseline, spacing: Space.m) {
+                    Text(p.name).font(.ui(.body, .medium)).foregroundStyle(Palette.primary.opacity(0.85))
+                    Text(p.reason).font(.ui(.secondary)).foregroundStyle(Palette.tertiary)
+                    Spacer()
+                }
+                .padding(.leading, 26)
+                .accessibilityElement(children: .combine)
+            }
+            if places.contains(where: \.needsFullDiskAccess) {
+                Text("macOS keeps these private. Bubble skips them so no permission dialogs pop up while it scans.")
+                    .font(.ui(.caption)).foregroundStyle(Palette.tertiary)
+                    .padding(.leading, 26)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(.horizontal, Space.l).padding(.vertical, Space.m)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .panel(radius: Radius.row)
     }
 }
