@@ -89,7 +89,7 @@ struct AppRemover: Sendable {
             return skipped("\(app.name) changed since the list was read. Refresh and try again.")
         }
         if await quit(app.path) == .stillRunning {
-            return skipped("\(app.name) is still open. Quit it and try again.")
+            return skipped("\(app.name) wouldn't quit, so Bubble left it alone. Quit it and try again.")
         }
 
         var pending: [PendingAdmin] = []
@@ -368,19 +368,62 @@ struct AppRemover: Sendable {
         }
     }
 
-    /// Asks every running copy of the app at `path` to quit, and waits up to ~6 seconds.
-    /// Never force-quits.
-    @MainActor static func quitApp(path: String) async -> QuitOutcome {
-        let target = URL(fileURLWithPath: path).resolvingSymlinksInPath().standardizedFileURL.path
-        let running = NSWorkspace.shared.runningApplications.filter {
-            $0.bundleURL?.resolvingSymlinksInPath().standardizedFileURL.path == target
+    /// Quits the app at `path` and everything running from inside its bundle (helpers such as
+    /// Zoom's CptHost): asks nicely, then force-quits whatever is still open after a few
+    /// seconds, so an app's own "Are you sure you want to quit?" can't stall the removal.
+    /// Only the user's own processes are touched.
+    @MainActor static func quitApp(path: String, grace: Duration = .seconds(3)) async -> QuitOutcome {
+        let bundle = realPath(path)
+        let apps = NSWorkspace.shared.runningApplications.filter {
+            $0.bundleURL.map { isInside(realPath($0.path), bundle: bundle) } ?? false
         }
-        guard !running.isEmpty else { return .notRunning }
-        for app in running { app.terminate() }
-        for _ in 0..<30 {
-            if running.allSatisfy(\.isTerminated) { return .quit }
-            try? await Task.sleep(for: .milliseconds(200))
+        let helpers = { processes(inside: bundle).subtracting(apps.map(\.processIdentifier)) }
+        guard !apps.isEmpty || !helpers().isEmpty else { return .notRunning }
+
+        func allGone() -> Bool { apps.allSatisfy(\.isTerminated) && helpers().isEmpty }
+        func wait(_ limit: Duration) async -> Bool {
+            let deadline = ContinuousClock.now + limit
+            while ContinuousClock.now < deadline {
+                if allGone() { return true }
+                try? await Task.sleep(for: .milliseconds(200))
+            }
+            return allGone()
         }
-        return running.allSatisfy(\.isTerminated) ? .quit : .stillRunning
+
+        for app in apps { app.terminate() }
+        if await wait(grace) { return .quit }
+        for app in apps where !app.isTerminated { app.forceTerminate() }
+        for pid in helpers() { kill(pid, SIGKILL) }
+        return await wait(.seconds(2)) ? .quit : .stillRunning
+    }
+
+    /// The path as the kernel reports it (`proc_pidpath` keeps /private; Foundation drops it).
+    static func realPath(_ path: String) -> String {
+        guard let p = realpath(path, nil) else { return path }
+        defer { free(p) }
+        return String(cString: p)
+    }
+
+    /// True when `path` is `bundle` itself or inside it.
+    static func isInside(_ path: String, bundle: String) -> Bool {
+        path == bundle || path.hasPrefix(bundle.hasSuffix("/") ? bundle : bundle + "/")
+    }
+
+    /// The user's own processes whose executable lives inside `bundle`.
+    static func processes(inside bundle: String) -> Set<pid_t> {
+        let uid = getuid()
+        var pids = [pid_t](repeating: 0, count: 4096)
+        let n = Int(proc_listallpids(&pids, Int32(pids.count * MemoryLayout<pid_t>.size)))
+        var found: Set<pid_t> = []
+        var buf = [CChar](repeating: 0, count: Int(MAXPATHLEN) * 4)
+        var info = proc_bsdshortinfo()
+        for pid in pids.prefix(max(0, n)) where pid > 0 && pid != getpid() {
+            guard proc_pidinfo(pid, PROC_PIDT_SHORTBSDINFO, 0, &info, Int32(MemoryLayout<proc_bsdshortinfo>.size)) > 0,
+                  info.pbsi_uid == uid,
+                  proc_pidpath(pid, &buf, UInt32(buf.count)) > 0 else { continue }
+            // proc_pidpath returns the real path; `bundle` must be one too (see `realPath`).
+            if isInside(String(cString: buf), bundle: bundle) { found.insert(pid) }
+        }
+        return found
     }
 }

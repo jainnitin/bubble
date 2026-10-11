@@ -440,6 +440,41 @@ final class AppRemovalTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: path))
     }
 
+    func testHelpersInsideTheBundleCountAsTheApp() {
+        let zoom = "/Applications/zoom.us.app"
+        XCTAssertTrue(AppRemover.isInside(zoom, bundle: zoom))
+        XCTAssertTrue(AppRemover.isInside(zoom + "/Contents/Frameworks/cpthost.app/Contents/MacOS/CptHost", bundle: zoom))
+        XCTAssertFalse(AppRemover.isInside("/Applications/zoom.us.app.old/Contents/MacOS/zoom.us", bundle: zoom))
+        XCTAssertFalse(AppRemover.isInside("/Applications", bundle: zoom))
+    }
+
+    func testQuittingFindsOwnProcessesOnly() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("bubble-quit-\(UUID().uuidString).app")
+        let exe = dir.appendingPathComponent("Contents/MacOS/sleeper")
+        try FileManager.default.createDirectory(at: exe.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try FileManager.default.copyItem(atPath: "/bin/sleep", toPath: exe.path)
+        // A copied platform binary is killed at launch until it's re-signed.
+        let sign = Process()
+        sign.executableURL = URL(fileURLWithPath: "/usr/bin/codesign")
+        sign.arguments = ["-s", "-", "-f", exe.path]
+        let signed = sign.exitSignal()
+        try sign.run()
+        signed.wait()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let bundle = AppRemover.realPath(dir.path)
+        XCTAssertEqual(AppRemover.processes(inside: bundle), [])
+        let p = Process()
+        p.executableURL = exe
+        p.arguments = ["30"]
+        try p.run()
+        defer { if p.isRunning { p.terminate() } }
+        for _ in 0..<20 where AppRemover.processes(inside: bundle).isEmpty { try await Task.sleep(for: .milliseconds(50)) }
+        XCTAssertEqual(AppRemover.processes(inside: bundle), [p.processIdentifier])
+        let outcome = await AppRemover.quitApp(path: dir.path, grace: .milliseconds(200))
+        XCTAssertEqual(outcome, .quit, "a helper that ignores quitting is force-quit")
+        XCTAssertFalse(p.isRunning)
+    }
+
     func testProtectedOrReplacedAppIsRefused() async throws {
         let mac = try FakeMac()
         let path = try mac.app("Busy", id: "com.example.busy")
