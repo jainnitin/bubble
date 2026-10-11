@@ -8,9 +8,9 @@ import Foundation
 /// optional default patterns, so when there is no file yet we seed it with
 /// Mole's own DEFAULT_WHITELIST_PATTERNS to keep that protection.
 ///
-/// Safety rules:
-/// - A whitelist that exists but can't be read as UTF-8 aborts the clean
-///   (it is never treated as "no whitelist" and overwritten).
+/// Safety rules (the file handling is `TemporaryWhitelist`'s, shared with Optimize):
+/// - A whitelist that exists but can't be read as UTF-8, or is a symlink or a folder,
+///   aborts the clean (it is never treated as "no whitelist" and overwritten).
 /// - The backup records both the user's original and exactly what Bubble wrote.
 ///   On restore the original is put back only if the file still holds exactly
 ///   Bubble's text; if anyone changed it meanwhile, their version is kept and
@@ -24,6 +24,7 @@ enum Whitelist {
     /// Where a backup goes when the whitelist changed during a clean and was left alone.
     static let discarded = dir.appendingPathComponent("whitelist.bubble-discarded")
     static let marker = "# bubble: kept for this clean only\n"
+    static let temporary = TemporaryWhitelist(file: file, backup: backup, discarded: discarded, version: 2)
 
     /// True while a temporary whitelist is in place (a clean is running, or Bubble
     /// quit mid-clean and hasn't restored yet). Read live; the settings editor
@@ -63,8 +64,7 @@ enum Whitelist {
     }
 
     static func originalState(backupData: Data) -> FileState? {
-        guard let b = try? JSONDecoder().decode(Backup.self, from: backupData), b.version == 2 else { return nil }
-        return b.original.map(FileState.text) ?? .missing
+        temporary.decodeBackup(backupData).map { $0.original.map(FileState.text) ?? .missing }
     }
 
     enum Failure: LocalizedError, Equatable {
@@ -85,20 +85,13 @@ enum Whitelist {
         }
     }
 
-    /// The backup: what the file held before (nil = no file) and exactly what Bubble wrote.
-    private struct Backup: Codable {
-        var version = 2
-        var original: String?
-        var written: String
-    }
-
     static func protect(_ paths: [String]) throws {
         guard !paths.isEmpty else { return }
         let rejected = rejectedPaths(paths)
         guard rejected.isEmpty else { throw Failure.rejectedPaths(rejected) }
         restoreIfNeeded()
-        let target = file.resolvingSymlinksInPath()
-        let original = try readExisting(target)
+        let original: String?
+        do { original = try temporary.readOriginal() } catch let e as TemporaryWhitelist.Unreadable { throw Failure.unreadable(e.reason) }
         var base: String
         if let original {
             base = original
@@ -109,70 +102,18 @@ enum Whitelist {
         }
         if !base.isEmpty, !base.hasSuffix("\n") { base += "\n" }
         let written = base + marker + paths.joined(separator: "\n") + "\n"
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        // Backup first: if writing the whitelist then fails, restore sees the file
-        // doesn't hold `written` and leaves it alone.
-        let data = try JSONEncoder().encode(Backup(original: original, written: written))
-        try data.write(to: backup, options: .atomic)
-        try written.write(to: target, atomically: true, encoding: .utf8)
-    }
-
-    /// nil when there is no whitelist; throws when there is one that can't be read as UTF-8.
-    private static func readExisting(_ url: URL) throws -> String? {
-        var isDir: ObjCBool = false
-        let fm = FileManager.default
-        let exists = fm.fileExists(atPath: url.path, isDirectory: &isDir)
-        // A dangling symlink counts as "exists": don't replace the user's link.
-        let isLink = (try? fm.destinationOfSymbolicLink(atPath: file.path)) != nil
-        if !exists {
-            if isLink { throw Failure.unreadable("it's a symlink to a missing file") }
-            return nil
-        }
-        if isDir.boolValue { throw Failure.unreadable("it's a folder") }
-        let data: Data
-        do { data = try Data(contentsOf: url) } catch { throw Failure.unreadable(error.localizedDescription) }
-        guard let text = String(data: data, encoding: .utf8) else { throw Failure.unreadable("it isn't valid UTF-8 text") }
-        return text
+        try temporary.write(written, original: original)
     }
 
     /// Puts the user's whitelist back. Safe to call any time; also runs at launch
     /// in case Bubble quit mid-clean. Only restores when the file still holds
     /// exactly what Bubble wrote; otherwise keeps the user's current file.
-    static func restoreIfNeeded() {
-        let fm = FileManager.default
-        let target = file.resolvingSymlinksInPath()
-        guard let data = try? Data(contentsOf: backup) else { return }
-        let current = (try? Data(contentsOf: target)).flatMap { String(data: $0, encoding: .utf8) }
-        switch restoreAction(backupData: data, current: current) {
-        case .restore(let original):
-            if let original {
-                try? original.write(to: target, atomically: true, encoding: .utf8)
-            } else {
-                try? fm.removeItem(at: target)
-            }
-            try? fm.removeItem(at: backup)
-        case .leaveAlone:
-            try? fm.removeItem(at: discarded)
-            try? fm.moveItem(at: backup, to: discarded)
-            if fm.fileExists(atPath: backup.path) { try? fm.removeItem(at: backup) }
-        }
-    }
+    static func restoreIfNeeded() { temporary.restoreIfNeeded() }
 
-    enum RestoreAction: Equatable {
-        /// Put this back (nil = delete the file, there was none before).
-        case restore(String?)
-        /// The file changed since Bubble wrote it; keep it.
-        case leaveAlone
-    }
+    typealias RestoreAction = TemporaryWhitelist.RestoreAction
 
-    /// What `restoreIfNeeded` should do with this backup, given the file's current text.
-    /// A backup Bubble can't read is set aside rather than trusted.
     static func restoreAction(backupData: Data, current: String?) -> RestoreAction {
-        guard let b = try? JSONDecoder().decode(Backup.self, from: backupData), b.version == 2 else { return .leaveAlone }
-        if current == b.written { return .restore(b.original) }
-        // Nothing there now and nothing there before: same state either way.
-        if current == nil, b.original == nil { return .restore(nil) }
-        return .leaveAlone
+        temporary.restoreAction(backupData: backupData, current: current)
     }
 
     // MARK: Validation (mirrors load_mole_whitelist in Mole's lib/core/base.sh)
@@ -219,5 +160,106 @@ enum Whitelist {
             patterns.append(value == "$FINDER_METADATA_SENTINEL" ? "FINDER_METADATA" : value)
         }
         return patterns
+    }
+}
+
+/// A Mole whitelist file that Bubble changes for one run and then puts back exactly as it
+/// was: Clean's `whitelist` and Optimize's `whitelist_optimize`.
+///
+/// - The file is never rewritten when it's a symlink (even a dangling one), a folder, or
+///   not readable as UTF-8 text.
+/// - The backup (JSON: version, the original or nil for no file, and exactly what Bubble
+///   wrote) is saved before the file is written; if that write fails the file is put back.
+/// - Restore puts the original back only if the file still holds Bubble's text; otherwise
+///   the user's newer file is kept and the backup set aside at `discarded`.
+struct TemporaryWhitelist {
+    let file: URL
+    let backup: URL
+    let discarded: URL
+    /// The backup format's version. Each list keeps the one it always wrote (Clean 2,
+    /// Optimize 1), so a backup left by an interrupted run of an older Bubble still restores.
+    let version: Int
+
+    struct Unreadable: Error, Equatable { let reason: String }
+
+    struct Backup: Codable {
+        var version: Int
+        var original: String?
+        var written: String
+    }
+
+    enum RestoreAction: Equatable {
+        /// Put this back (nil = delete the file, there was none before).
+        case restore(String?)
+        /// The file changed since Bubble wrote it; keep it.
+        case leaveAlone
+    }
+
+    /// The backup, or nil when it isn't one this list wrote.
+    func decodeBackup(_ data: Data) -> Backup? {
+        guard let b = try? JSONDecoder().decode(Backup.self, from: data), b.version == version else { return nil }
+        return b
+    }
+
+    /// The file's text now; nil when there's none.
+    func readOriginal() throws -> String? { try Self.read(file) }
+
+    /// nil when there's no file; throws `Unreadable` for anything Bubble shouldn't rewrite.
+    static func read(_ url: URL) throws -> String? {
+        let fm = FileManager.default
+        if (try? fm.destinationOfSymbolicLink(atPath: url.path)) != nil { throw Unreadable(reason: "it's a symlink") }
+        var isDir: ObjCBool = false
+        guard fm.fileExists(atPath: url.path, isDirectory: &isDir) else { return nil }
+        if isDir.boolValue { throw Unreadable(reason: "it's a folder") }
+        let data: Data
+        do { data = try Data(contentsOf: url) } catch { throw Unreadable(reason: error.localizedDescription) }
+        guard let text = String(data: data, encoding: .utf8) else { throw Unreadable(reason: "it isn't valid UTF-8 text") }
+        return text
+    }
+
+    /// Saves the backup, then writes `written` over the file.
+    func write(_ written: String, original: String?) throws {
+        try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+        // Backup first: if writing the file then fails, restore sees it doesn't hold
+        // `written` and leaves it alone.
+        try JSONEncoder().encode(Backup(version: version, original: original, written: written)).write(to: backup, options: .atomic)
+        do {
+            try written.write(to: file, atomically: true, encoding: .utf8)
+        } catch {
+            restoreIfNeeded()
+            throw error
+        }
+    }
+
+    /// What `restoreIfNeeded` should do with this backup, given the file's current text.
+    /// A backup Bubble can't read is set aside rather than trusted.
+    func restoreAction(backupData: Data, current: String?) -> RestoreAction {
+        guard let b = decodeBackup(backupData) else { return .leaveAlone }
+        if current == b.written { return .restore(b.original) }
+        // Nothing there now and nothing there before: same state either way.
+        if current == nil, b.original == nil { return .restore(nil) }
+        return .leaveAlone
+    }
+
+    /// Puts the user's file back when a backup exists. Safe to call any time.
+    func restoreIfNeeded() {
+        let fm = FileManager.default
+        guard let data = try? Data(contentsOf: backup) else { return }
+        // Through a symlink, as older Bubbles wrote Clean's list through one.
+        let target = file.resolvingSymlinksInPath()
+        let current = (try? Data(contentsOf: target)).flatMap { String(data: $0, encoding: .utf8) }
+        switch restoreAction(backupData: data, current: current) {
+        case .restore(let original):
+            if let original {
+                try? original.write(to: target, atomically: true, encoding: .utf8)
+            } else {
+                try? fm.removeItem(at: target)
+            }
+            try? fm.removeItem(at: backup)
+        case .leaveAlone:
+            try? fm.removeItem(at: discarded)
+            try? fm.moveItem(at: backup, to: discarded)
+            if fm.fileExists(atPath: backup.path) { try? fm.removeItem(at: backup) }
+        }
     }
 }

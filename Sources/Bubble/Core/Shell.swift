@@ -306,9 +306,9 @@ enum Shell {
         return await output(mo, args, sandbox: sandbox)
     }
 
-    static func moText(_ args: [String], input: String? = nil) async -> String {
+    static func moText(_ args: [String], input: String? = nil, sandbox: String? = nil) async -> String {
         guard let mo else { return "" }
-        let data = await output(mo, args, input: input)
+        let data = await output(mo, args, input: input, sandbox: sandbox)
         return clean(String(decoding: data, as: UTF8.self))
     }
 

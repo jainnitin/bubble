@@ -72,7 +72,8 @@ final class OptimizeModel {
             OptimizeWhitelist.end()
             planning = false
         }
-        let text = await Shell.moText(["optimize", "--dry-run"])
+        // Only the plan runs guarded; the real run needs its PTY and Bubble's own admin step.
+        let text = await Shell.moText(["optimize", "--dry-run"], sandbox: PrivacyGuard.currentProfile())
         let n = text.split(separator: "\n").filter { $0.trimmingCharacters(in: .whitespaces).hasPrefix("➤") }.count
         guard n > 0 else { return }
         Self.sessionPlan = n

@@ -7,14 +7,10 @@ import Foundation
 /// so Bubble adds those ids there for one run (the `--dry-run` plan or the real run) and
 /// then puts the user's file back exactly as it was.
 ///
-/// Same rules as Clean's `Whitelist`:
-/// - The backup records the user's original (nil = no file) and exactly what Bubble wrote.
-///   Restore puts the original back only if the file still holds Bubble's text; otherwise
-///   the user's newer file is kept and the backup set aside as `.bubble-discarded`.
-/// - A whitelist that exists but can't be read as UTF-8 text (or is a folder or a symlink)
-///   is never touched; the run then goes ahead without the skips.
-/// - A backup left by a run that never finished (Bubble quit) is restored before the next
-///   change and when Optimize starts up.
+/// The file handling is Clean's (`TemporaryWhitelist`): the user's file is put back exactly,
+/// a newer edit is kept, and a file Bubble can't safely rewrite is never touched (the run
+/// then goes ahead without the skips). A backup left by a run that never finished (Bubble
+/// quit) is restored before the next change and when Optimize starts up.
 ///
 /// Mole matches whitelist lines against the task id exactly (`is_whitelisted "$action"`),
 /// so the lines are ids from lib/optimize/catalog.sh, not display names.
@@ -39,15 +35,9 @@ enum OptimizeWhitelist {
         var backup: URL { dir.appendingPathComponent("whitelist_optimize.bubble-backup") }
         var discarded: URL { dir.appendingPathComponent("whitelist_optimize.bubble-discarded") }
 
+        var temporary: TemporaryWhitelist { TemporaryWhitelist(file: file, backup: backup, discarded: discarded, version: 1) }
+
         static let standard = Paths(dir: FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".config/mole"))
-    }
-
-    enum Failure: Error, Equatable { case unreadable(String) }
-
-    private struct Backup: Codable {
-        var version = 1
-        var original: String?
-        var written: String
     }
 
     // MARK: One holder at a time (the plan and a run can overlap)
@@ -92,57 +82,19 @@ enum OptimizeWhitelist {
     /// Writes the temporary whitelist. Returns the ids Bubble added (ids already in the
     /// user's list are left as they are and not returned).
     static func apply(_ ids: [String], paths: Paths) throws -> [String] {
-        restoreIfNeeded(paths: paths)
-        let original = try readText(paths.file)
-        var base = original ?? ((try? readText(paths.legacy)) ?? nil) ?? ""
+        let list = paths.temporary
+        list.restoreIfNeeded()
+        let original = try list.readOriginal()
+        var base = original ?? ((try? TemporaryWhitelist.read(paths.legacy)) ?? nil) ?? ""
         let existing = Set(base.split(whereSeparator: \.isNewline).map { $0.trimmingCharacters(in: .whitespaces) })
         let missing = ids.filter { !existing.contains($0) }
         guard !missing.isEmpty else { return [] }
         if !base.isEmpty, !base.hasSuffix("\n") { base += "\n" }
         let written = base + marker + missing.joined(separator: "\n") + "\n"
-        try FileManager.default.createDirectory(at: paths.dir, withIntermediateDirectories: true)
-        // Backup first: if the write then fails, restore sees the file doesn't hold
-        // `written` and leaves it alone.
-        try JSONEncoder().encode(Backup(original: original, written: written)).write(to: paths.backup, options: .atomic)
-        do {
-            try written.write(to: paths.file, atomically: true, encoding: .utf8)
-        } catch {
-            restoreIfNeeded(paths: paths)
-            throw error
-        }
+        try list.write(written, original: original)
         return missing
     }
 
     /// Puts the user's file back. Safe to call any time.
-    static func restoreIfNeeded(paths: Paths) {
-        let fm = FileManager.default
-        guard let data = try? Data(contentsOf: paths.backup) else { return }
-        let current = (try? Data(contentsOf: paths.file)).flatMap { String(data: $0, encoding: .utf8) }
-        if let b = try? JSONDecoder().decode(Backup.self, from: data), b.version == 1,
-           current == b.written || (current == nil && b.original == nil) {
-            if let original = b.original {
-                try? original.write(to: paths.file, atomically: true, encoding: .utf8)
-            } else {
-                try? fm.removeItem(at: paths.file)
-            }
-            try? fm.removeItem(at: paths.backup)
-        } else {
-            // Changed since Bubble wrote it (or an unreadable backup): keep the file.
-            try? fm.removeItem(at: paths.discarded)
-            try? fm.moveItem(at: paths.backup, to: paths.discarded)
-            if fm.fileExists(atPath: paths.backup.path) { try? fm.removeItem(at: paths.backup) }
-        }
-    }
-
-    /// nil when there's no file; throws when there's something Bubble shouldn't rewrite.
-    private static func readText(_ url: URL) throws -> String? {
-        let fm = FileManager.default
-        if (try? fm.destinationOfSymbolicLink(atPath: url.path)) != nil { throw Failure.unreadable("it's a symlink") }
-        var isDir: ObjCBool = false
-        guard fm.fileExists(atPath: url.path, isDirectory: &isDir) else { return nil }
-        if isDir.boolValue { throw Failure.unreadable("it's a folder") }
-        guard let data = try? Data(contentsOf: url) else { throw Failure.unreadable("it couldn't be opened") }
-        guard let text = String(data: data, encoding: .utf8) else { throw Failure.unreadable("it isn't UTF-8 text") }
-        return text
-    }
+    static func restoreIfNeeded(paths: Paths) { paths.temporary.restoreIfNeeded() }
 }

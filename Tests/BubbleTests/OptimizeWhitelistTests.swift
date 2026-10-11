@@ -130,3 +130,67 @@ final class LiveOptimizeWhitelistTests: XCTestCase {
         }
     }
 }
+
+/// The file handling Clean's and Optimize's temporary whitelists share.
+final class TemporaryWhitelistTests: XCTestCase {
+    private var dir: URL!
+
+    override func setUpWithError() throws {
+        dir = FileManager.default.temporaryDirectory.appendingPathComponent("bubble-tmpwl-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    }
+
+    override func tearDown() {
+        try? FileManager.default.removeItem(at: dir)
+    }
+
+    private func list(version: Int) -> TemporaryWhitelist {
+        TemporaryWhitelist(file: dir.appendingPathComponent("whitelist"), backup: dir.appendingPathComponent("whitelist.bubble-backup"),
+                           discarded: dir.appendingPathComponent("whitelist.bubble-discarded"), version: version)
+    }
+
+    /// A backup as the code before the shared helper wrote it.
+    private func earlierBackup(version: Int, original: String?, written: String) throws -> Data {
+        var obj: [String: Any] = ["version": version, "written": written]
+        if let original { obj["original"] = original }
+        return try JSONSerialization.data(withJSONObject: obj)
+    }
+
+    func testStaleBackupsFromEarlierVersionsRestore() throws {
+        // Clean wrote version 2, Optimize version 1; each list reads only its own.
+        for version in [1, 2] {
+            let l = list(version: version)
+            try "/mine\n# bubble…\n/x\n".write(to: l.file, atomically: true, encoding: .utf8)
+            try earlierBackup(version: version, original: "/mine\n", written: "/mine\n# bubble…\n/x\n").write(to: l.backup)
+            l.restoreIfNeeded()
+            XCTAssertEqual(try String(contentsOf: l.file, encoding: .utf8), "/mine\n", "version \(version)")
+            XCTAssertFalse(FileManager.default.fileExists(atPath: l.backup.path))
+        }
+        XCTAssertEqual(list(version: 2).restoreAction(backupData: try earlierBackup(version: 1, original: nil, written: "x"), current: "x"),
+                       .leaveAlone, "another list's backup is never trusted")
+        XCTAssertEqual(Whitelist.temporary.version, 2)
+        XCTAssertEqual(OptimizeWhitelist.Paths(dir: dir).temporary.version, 1)
+    }
+
+    func testWriteThenRestoreRoundTrips() throws {
+        let l = list(version: 2)
+        try l.write("/a\n/b\n", original: nil)
+        XCTAssertEqual(l.decodeBackup(try Data(contentsOf: l.backup))?.written, "/a\n/b\n")
+        l.restoreIfNeeded()
+        XCTAssertFalse(FileManager.default.fileExists(atPath: l.file.path))
+    }
+
+    func testRefusesWhatItShouldNotRewrite() throws {
+        let l = list(version: 1)
+        let real = dir.appendingPathComponent("real")
+        try "x\n".write(to: real, atomically: true, encoding: .utf8)
+        try FileManager.default.createSymbolicLink(at: l.file, withDestinationURL: real)
+        XCTAssertThrowsError(try l.readOriginal()) { XCTAssertEqual($0 as? TemporaryWhitelist.Unreadable, .init(reason: "it's a symlink")) }
+        try FileManager.default.removeItem(at: real)
+        XCTAssertThrowsError(try l.readOriginal(), "a dangling symlink isn't 'no file'")
+        try FileManager.default.removeItem(at: l.file)
+        XCTAssertNil(try l.readOriginal())
+        try FileManager.default.createDirectory(at: l.file, withIntermediateDirectories: false)
+        XCTAssertThrowsError(try l.readOriginal())
+    }
+}

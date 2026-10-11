@@ -5,7 +5,8 @@ import SwiftUI
 @MainActor
 final class DoctorModel {
     struct Check: Identifiable {
-        enum State { case ok, warn, fail }
+        /// `info`: nothing is wrong, but there's an optional step.
+        enum State { case ok, info, warn, fail }
         var id: String { title }
         var title: String
         var detail: String
@@ -14,13 +15,14 @@ final class DoctorModel {
     }
 
     enum Fix {
-        case updateMole, setUpMole, openFullDiskAccess, restoreWhitelist, openAnalyze, runInTerminal(String), enableTouchID
+        case updateMole, setUpMole, openFullDiskAccess, relaunch, restoreWhitelist, openAnalyze, runInTerminal(String), enableTouchID
         var title: String {
             switch self {
             case .enableTouchID: "Turn On"
             case .updateMole: "Update Mole"
             case .setUpMole: "Set up Mole"
             case .openFullDiskAccess: "Open Settings"
+            case .relaunch: "Relaunch Bubble"
             case .restoreWhitelist: "Restore"
             case .openAnalyze: "Open Analyze"
             case .runInTerminal: "Copy command"
@@ -28,7 +30,15 @@ final class DoctorModel {
         }
     }
 
-    var checks: [Check] = []
+    /// The checks from the last run, with Full Disk Access read live: it changes when the
+    /// user grants it in System Settings and switches back.
+    var checks: [Check] {
+        var all = results
+        if let i = fullDiskAccessIndex { all.insert(Self.fullDiskAccessCheck(FullDiskAccess.shared), at: i) }
+        return all
+    }
+    private var results: [Check] = []
+    private var fullDiskAccessIndex: Int?
     var running = false
     var log: [String] = []
 
@@ -62,10 +72,7 @@ final class DoctorModel {
         }
 
         // Permissions
-        out.append(SystemSettings.hasFullDiskAccess
-            ? Check(title: "Full Disk Access is on", detail: "Mole can scan Trash, Mail and other protected folders.", state: .ok)
-            : Check(title: "Full Disk Access is off", detail: "Scans skip protected folders until you allow Bubble in System Settings.",
-                    state: .warn, fix: .openFullDiskAccess))
+        let fullDiskAccessAt = out.count
 
         out.append(Admin.touchIDForSudo()
             ? Check(title: "Touch ID works for admin tasks", detail: "Bubble's admin tasks and sudo in Terminal can use Touch ID.", state: .ok)
@@ -94,7 +101,8 @@ final class DoctorModel {
             out.append(Check(title: "System health \(score)", detail: StatusModel.shared.snap?.healthScoreMsg ?? "",
                              state: score >= 80 ? .ok : score >= 50 ? .warn : .fail))
         }
-        checks = out
+        results = out
+        fullDiskAccessIndex = fullDiskAccessAt
     }
 
     // MARK: Touch ID for sudo
@@ -141,9 +149,23 @@ final class DoctorModel {
                 "The command is on your clipboard: paste it into Terminal and press Return."]
     }
 
+    static func fullDiskAccessCheck(_ access: FullDiskAccess) -> Check {
+        if access.isOn {
+            return Check(title: "Full Disk Access is on", detail: "Mole can scan Trash, Mail and other protected folders.", state: .ok)
+        }
+        if access.returnedWithoutGrant {
+            return Check(title: "Full Disk Access is off",
+                         detail: "Optional. If you just allowed Bubble, relaunch it so the change applies.",
+                         state: .info, fix: .relaunch)
+        }
+        return Check(title: "Full Disk Access is off", detail: "Optional: scans skip Trash, Mail and private folders.",
+                     state: .info, fix: .openFullDiskAccess)
+    }
+
     func apply(_ fix: Fix, openTab: (Tab) -> Void) async {
         switch fix {
-        case .openFullDiskAccess: SystemSettings.openFullDiskAccess()
+        case .openFullDiskAccess: FullDiskAccess.shared.openSettings()
+        case .relaunch: AppRelaunch.relaunch()
         case .restoreWhitelist:
             // Never pull the temporary list out from under a running clean.
             if !Whitelist.cleanInProgress { Whitelist.restoreIfNeeded() }
@@ -214,6 +236,7 @@ struct DoctorSheet: View {
     private func row(_ c: DoctorModel.Check) -> some View {
         let (icon, color): (String, Color) = switch c.state {
         case .ok: ("checkmark.circle.fill", Palette.green)
+        case .info: ("info.circle.fill", Palette.secondary)
         case .warn: ("exclamationmark.circle.fill", Palette.amber)
         case .fail: ("xmark.circle.fill", Palette.red)
         }
