@@ -57,9 +57,19 @@ struct MetricCard<Body: View>: View {
                         Image(systemName: icon).foregroundStyle(iconColor)
                     }
                     .foregroundStyle(.white.opacity(0.75))
-                    Spacer()
-                    if let badge { Tag(text: badge) }
-                    ForEach(tags, id: \.self) { Tag(text: $0) }
+                    .fixedSize()
+                    Spacer(minLength: Space.s)
+                    // In a narrow window, drop tags from the end rather than wrap the title.
+                    ViewThatFits(in: .horizontal) {
+                        ForEach((0...tags.count).reversed(), id: \.self) { n in
+                            HStack(spacing: Space.s) {
+                                if let badge { Tag(text: badge) }
+                                ForEach(tags.prefix(n), id: \.self) { Tag(text: $0) }
+                            }
+                            .fixedSize()
+                        }
+                        if let badge { Tag(text: badge).lineLimit(1) }
+                    }
                 }
                 content
             }
@@ -177,20 +187,23 @@ struct HealthCard: View {
         let score = s?.healthScore ?? 0
         let color = score >= 80 ? Palette.green : score >= 50 ? Palette.amber : Palette.red
         MetricCard(icon: "sun.max", title: "Health", iconColor: color, tags: hardwareTags(s)) {
-            HStack(alignment: .top) {
-                VStack(alignment: .leading, spacing: 0) {
-                    HStack(alignment: .firstTextBaseline, spacing: 8) {
-                        Text("\(score)").font(.num(.title, .bold))
-                        Text(s?.healthScoreMsg ?? "").font(.ui(.section, .medium)).foregroundStyle(.white.opacity(0.8))
+            VStack(alignment: .leading, spacing: 0) {
+                // The bubble sits beside the score, centred on it, clear of the tag row.
+                HStack(alignment: .center, spacing: Space.m) {
+                    VStack(alignment: .leading, spacing: 0) {
+                        HStack(alignment: .firstTextBaseline, spacing: 8) {
+                            Text("\(score)").font(.num(.title, .bold))
+                            Text(s?.healthScoreMsg ?? "").font(.ui(.section, .medium)).foregroundStyle(.white.opacity(0.8))
+                        }
+                        Text(score >= 80 ? "All checks passed" : "Some checks need attention")
+                            .font(.ui(.body)).foregroundStyle(Palette.secondary).padding(.top, 12)
                     }
-                    .padding(.top, 14)
-                    Text(score >= 80 ? "All checks passed" : "Some checks need attention")
-                        .font(.ui(.body)).foregroundStyle(Palette.secondary).padding(.top, 12)
-                    Spacer()
-                    Footnote(text: "Up \(s?.uptime ?? "—"), \(s?.procs ?? 0) processes")
+                    Spacer(minLength: 0)
+                    BubbleView().frame(width: 60, height: 60).padding(.trailing, Space.xs)
                 }
-                Spacer()
-                BubbleView().frame(width: 96, height: 96).padding(.top, 4)
+                .padding(.top, 14)
+                Spacer(minLength: Space.s)
+                Footnote(text: "Up \(s?.uptime ?? "—"), \(s?.procs ?? 0) processes")
             }
         }
     }

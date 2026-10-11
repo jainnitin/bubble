@@ -29,11 +29,11 @@ struct BubbleApp: App {
         Window("Bubble", id: "main") {
             RootView()
                 .environment(status)
-                .frame(minWidth: 1080, minHeight: 720)
+                .frame(minWidth: 900, minHeight: 720)
                 .preferredColorScheme(.dark)
         }
         .windowStyle(.hiddenTitleBar)
-        .defaultSize(width: 1280, height: 820)
+        .initialWindowSize()
         .commands {
             NavigationCommands()
             UpdateCommands()
@@ -51,6 +51,34 @@ struct BubbleApp: App {
             MenuBarLabel().environment(status)
         }
         .menuBarExtraStyle(.window)
+    }
+}
+
+/// First-launch window size: about 80% of the screen, within a range where every
+/// section lays out well. After that SwiftUI restores the user's own frame.
+enum InitialWindow {
+    static let minimum = CGSize(width: 1100, height: 760)
+    static let maximum = CGSize(width: 1600, height: 1040)
+
+    static func size(in visible: CGSize?) -> CGSize {
+        guard let visible, visible.width > 0, visible.height > 0 else { return CGSize(width: 1280, height: 820) }
+        func fit(_ v: CGFloat, _ lo: CGFloat, _ hi: CGFloat) -> CGFloat {
+            // Never larger than the screen, even when that's below the minimum.
+            min(min(max(v * 0.8, lo), hi), v).rounded()
+        }
+        return CGSize(width: fit(visible.width, minimum.width, maximum.width),
+                      height: fit(visible.height, minimum.height, maximum.height))
+    }
+}
+
+private extension Scene {
+    // macOS 15's defaultWindowPlacement would read the display from its context, but
+    // SceneBuilder can't branch on availability (no buildLimitedAvailability), so the
+    // size comes from the main screen on every version.
+    func initialWindowSize() -> some Scene {
+        let screen = NSScreen.main ?? NSScreen.screens.first
+        return defaultSize(InitialWindow.size(in: screen?.visibleFrame.size))
+            .defaultPosition(.center)
     }
 }
 
@@ -116,23 +144,30 @@ struct RootView: View {
     @State private var mole = MoleInstall.shared
 
     var body: some View {
-        // A native sidebar instead of a row of tabs: keyboard navigation, VoiceOver
-        // and the translucent sidebar material come from macOS.
-        NavigationSplitView {
-            Sidebar(selection: $tab)
-                .navigationSplitViewColumnWidth(min: 190, ideal: 210, max: 260)
-        } detail: {
+        VStack(spacing: 0) {
+            // The section bar sits in the title bar strip, level with the traffic lights.
+            // Hidden during setup: no section works until Mole is installed.
             ZStack {
-                AppBackground()
+                WindowDragArea()
+                if !mole.setupActive {
+                    SectionBar(selection: $tab).transition(.opacity)
+                }
+            }
+            .frame(maxWidth: .infinity)
+            .frame(height: TopBar.height)
+
+            ZStack {
                 if mole.setupActive {
                     SetupView()
                 } else {
-                    content.padding(.top, Space.l)
+                    content
                 }
             }
-            .animation(Motion.tab, value: mole.setupActive)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .toolbar(removing: .sidebarToggle)
+        .ignoresSafeArea(.container, edges: .top)
+        .background(AppBackground())
+        .animation(Motion.tab, value: mole.setupActive)
         .tint(Palette.accent)
         .background(CenteredSheets())
         .sheet(isPresented: $showDoctor) { DoctorSheet().preferredColorScheme(.dark) }
@@ -165,108 +200,188 @@ struct RootView: View {
     }
 }
 
-struct Sidebar: View {
+/// The strip at the top of the window that holds the section bar. It spans the title
+/// bar, so the bar sits level with the traffic lights.
+enum TopBar {
+    static let height: CGFloat = 52
+    static let barHeight: CGFloat = 36
+}
+
+/// The sections as one capsule at the top of the window: the Bubble logo (app menu),
+/// then Clean, Apps, Optimize, Analyze and Status. The selected one is a solid white
+/// capsule that slides between items.
+struct SectionBar: View {
     @Binding var selection: Tab
-    @Environment(StatusModel.self) private var status
+    @Namespace private var ns
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
-        List(selection: Binding(get: { selection }, set: { if let t = $0 { selection = t } })) {
+        HStack(spacing: 2) {
+            LogoButton()
+                .padding(.trailing, 4)
             ForEach(Tab.allCases) { t in
-                Label(t.rawValue, systemImage: t.symbol)
-                    .font(.ui(.body, .medium))
-                    .tag(t)
+                SectionBarItem(tab: t, selected: selection == t, namespace: ns, slide: !reduceMotion) {
+                    selection = t
+                }
             }
         }
-        .listStyle(.sidebar)
-        // A solid ink sidebar, a shade lighter than the window, instead of the grey system material.
-        .scrollContentBackground(.hidden)
-        .background(Palette.sidebar)
-        .safeAreaInset(edge: .top, spacing: 0) {
-            LogoMenuButton()
-                .padding(.horizontal, Space.m)
-                .padding(.bottom, Space.s)
-        }
-        .safeAreaInset(edge: .bottom, spacing: 0) { vitals }
-    }
-
-    /// A glance at the machine from any section; click to open Status.
-    private var vitals: some View {
-        let s = status.snap
-        let disk = status.rootDisk
-        let free = max((disk?.total ?? 0) - (disk?.used ?? 0), 0)
-        return Button { selection = .status } label: {
-            VStack(alignment: .leading, spacing: 6) {
-                vital("cpu", "CPU", s.map { "\(Int(($0.cpu?.usage ?? 0).rounded()))%" } ?? "—")
-                vital("memorychip", "Memory", s.map { "\(Int(($0.memory?.usedPercent ?? 0).rounded()))%" } ?? "—")
-                vital("internaldrive", "Free", disk == nil ? "—" : Fmt.bytes(free))
-                if let t = status.cpuTemp { vital("thermometer.medium", "Temp", "\(Int(t.rounded()))°") }
-            }
-            .padding(Space.m)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .panel(radius: Radius.row)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.quiet)
-        .padding(Space.m)
-        .accessibilityElement(children: .combine)
-        .accessibilityHint("Opens Status")
-    }
-
-    private func vital(_ icon: String, _ label: String, _ value: String) -> some View {
-        HStack(spacing: Space.s) {
-            Image(systemName: icon).frame(width: 16).foregroundStyle(Palette.tertiary)
-            Text(label).foregroundStyle(Palette.secondary)
-            Spacer()
-            Text(value).font(.num(.secondary, .medium)).foregroundStyle(Palette.primary)
-        }
-        .font(.ui(.secondary))
+        .padding(3)
+        .frame(height: TopBar.barHeight)
+        .background(Capsule().fill(Color(hex: 0x05081A, opacity: 0.55)))
+        .overlay(Capsule().strokeBorder(Color.white.opacity(0.09), lineWidth: 1))
+        // ⌘1–⌘5 change the selection without a transaction, so animate on the value.
+        .animation(reduceMotion ? Motion.reduced : Motion.spring, value: selection)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Sections")
     }
 }
 
-/// The app name at the top of the sidebar opens a menu of app-level actions.
-struct LogoMenuButton: View {
-    @Environment(\.openSettings) private var openSettings
+private struct SectionBarItem: View {
+    let tab: Tab
+    let selected: Bool
+    let namespace: Namespace.ID
+    /// False under Reduce Motion: the highlight cross-fades instead of sliding.
+    let slide: Bool
+    let action: () -> Void
+    @State private var hovering = false
 
     var body: some View {
-        Button(action: showMenu) {
-            HStack(spacing: Space.s) {
-                BubbleView().frame(width: 22, height: 22)
-                Text("Bubble").font(.ui(.body, .semibold)).foregroundStyle(Palette.primary)
-                Image(systemName: "chevron.down").font(.system(size: 9, weight: .bold)).foregroundStyle(Palette.tertiary)
-                Spacer(minLength: 0)
+        Button(action: action) {
+            // The bold label reserves the width, so items don't shift when the weight changes.
+            ZStack {
+                Text(tab.rawValue).font(.ui(.body, .bold)).hidden()
+                Text(tab.rawValue)
+                    .font(.ui(.body, selected ? .bold : .semibold))
+                    .foregroundStyle(selected ? Palette.abyss : hovering ? Palette.primary : Palette.secondary)
             }
-            .padding(.vertical, 6).padding(.horizontal, 6)
-            .contentShape(Rectangle())
-            .rowHover()
+            .padding(.horizontal, 16)
+            .frame(maxHeight: .infinity)
+            .background {
+                if selected {
+                    if slide {
+                        Capsule().fill(.white).matchedGeometryEffect(id: "selection", in: namespace)
+                    } else {
+                        Capsule().fill(.white)
+                    }
+                } else if hovering {
+                    Capsule().fill(Color.white.opacity(0.07))
+                }
+            }
+            .contentShape(Capsule())
         }
-        .buttonStyle(.quiet)
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .animation(.easeOut(duration: 0.12), value: hovering)
+        .accessibilityLabel(tab.rawValue)
+        .accessibilityAddTraits(selected ? .isSelected : [])
+    }
+}
+
+/// The Bubble logo at the left of the section bar opens a menu of app-level actions.
+struct LogoButton: View {
+    @Environment(\.openSettings) private var openSettings
+    @State private var anchor = MenuAnchor()
+    @State private var hovering = false
+
+    var body: some View {
+        Button {
+            let open = openSettings
+            showAppMenu(under: anchor.view) { open() }
+        } label: {
+            BubbleView()
+                .frame(width: 22, height: 22)
+                .frame(width: 30, height: 30)
+                .background(Circle().fill(Color.white.opacity(hovering ? 0.12 : 0.06)))
+                .background(MenuAnchorView(anchor: anchor))
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .animation(.easeOut(duration: 0.12), value: hovering)
         .help("Bubble menu")
         .accessibilityLabel("Bubble menu")
     }
+}
 
-    private func showMenu() {
-        let menu = NSMenu()
-        menu.addItem(ClosureMenuItem("Settings…", symbol: "gearshape") { openSettings() })
-        menu.addItem(ClosureMenuItem("Run Checkup", symbol: "stethoscope") {
-            NotificationCenter.default.post(name: .bubbleShowDoctor, object: nil)
-        })
-        menu.addItem(.separator())
-        let awake = ClosureMenuItem("Keep Screen On", symbol: "cup.and.saucer") { KeepAwake.shared.toggle() }
-        awake.state = KeepAwake.shared.isOn ? .on : .off
-        menu.addItem(awake)
-        menu.addItem(ClosureMenuItem("Clean Screen", symbol: "paintbrush") { CleanScreen.shared.start() })
-        menu.addItem(.separator())
-        menu.addItem(ClosureMenuItem("About Bubble", symbol: "info.circle") {
-            NSApp.orderFrontStandardAboutPanel(options: [
-                .credits: NSAttributedString(string: "Bubble is free and open source.\nCleaning is done by Mole by tw93 (GPL-3.0)."),
-            ])
-            NSApp.activate(ignoringOtherApps: true)
-        })
-        let update = ClosureMenuItem("Check for Updates…", symbol: "arrow.triangle.2.circlepath") { Updater.shared.checkForUpdates() }
-        update.isEnabled = Updater.shared.canCheckForUpdates
-        menu.autoenablesItems = false
-        menu.addItem(update)
+/// Holds the AppKit view behind a button so a menu can open right under it.
+final class MenuAnchor {
+    weak var view: NSView?
+}
+
+private struct MenuAnchorView: NSViewRepresentable {
+    let anchor: MenuAnchor
+    func makeNSView(context: Context) -> NSView {
+        let v = NSView()
+        anchor.view = v
+        return v
+    }
+    func updateNSView(_ view: NSView, context: Context) { anchor.view = view }
+}
+
+/// The app menu: Settings, Checkup, Keep Screen On, Clean Screen, About, Updates.
+/// Opens under `view` when given, else at the pointer.
+@MainActor
+func showAppMenu(under view: NSView?, openSettings: @escaping () -> Void) {
+    let menu = NSMenu()
+    menu.addItem(ClosureMenuItem("Settings…", symbol: "gearshape") { openSettings() })
+    menu.addItem(ClosureMenuItem("Run Checkup", symbol: "stethoscope") {
+        NotificationCenter.default.post(name: .bubbleShowDoctor, object: nil)
+    })
+    menu.addItem(.separator())
+    let awake = ClosureMenuItem("Keep Screen On", symbol: "cup.and.saucer") { KeepAwake.shared.toggle() }
+    awake.state = KeepAwake.shared.isOn ? .on : .off
+    menu.addItem(awake)
+    menu.addItem(ClosureMenuItem("Clean Screen", symbol: "paintbrush") { CleanScreen.shared.start() })
+    menu.addItem(.separator())
+    menu.addItem(ClosureMenuItem("About Bubble", symbol: "info.circle") {
+        NSApp.orderFrontStandardAboutPanel(options: [
+            .credits: NSAttributedString(string: "Bubble is free and open source.\nCleaning is done by Mole by tw93 (GPL-3.0)."),
+        ])
+        NSApp.activate(ignoringOtherApps: true)
+    })
+    let update = ClosureMenuItem("Check for Updates…", symbol: "arrow.triangle.2.circlepath") { Updater.shared.checkForUpdates() }
+    update.isEnabled = Updater.shared.canCheckForUpdates
+    menu.autoenablesItems = false
+    menu.addItem(update)
+    if let view, view.window != nil {
+        // The menu's top-left corner goes 6pt below the view's bottom-left corner.
+        let y = view.isFlipped ? view.bounds.maxY + 6 : view.bounds.minY - 6
+        menu.popUp(positioning: nil, at: NSPoint(x: view.bounds.minX, y: y), in: view)
+    } else {
         menu.popUp(positioning: nil, at: NSPoint(x: NSEvent.mouseLocation.x - 20, y: NSEvent.mouseLocation.y - 26), in: nil)
+    }
+}
+
+/// Empty space around the section bar drags the window, as a title bar would; a
+/// double-click zooms or minimizes, following System Settings ▸ Desktop & Dock.
+struct WindowDragArea: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView { DragView() }
+    func updateNSView(_ view: NSView, context: Context) {}
+
+    private final class DragView: NSView {
+        override var mouseDownCanMoveWindow: Bool { true }
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            // An empty unified toolbar makes the title bar as tall as the strip, which
+            // centres the traffic lights on the section bar. It has no items, so nothing shows.
+            guard let window, window.toolbar == nil else { return }
+            let toolbar = NSToolbar(identifier: "BubbleMain")
+            toolbar.showsBaselineSeparator = false
+            window.toolbar = toolbar
+            window.toolbarStyle = .unified
+            window.titlebarSeparatorStyle = .none
+        }
+        override func mouseDown(with event: NSEvent) {
+            guard event.clickCount == 2 else {
+                window?.performDrag(with: event)
+                return
+            }
+            switch UserDefaults.standard.string(forKey: "AppleActionOnDoubleClick") {
+            case "Minimize": window?.performMiniaturize(nil)
+            case "None": break
+            default: window?.performZoom(nil)
+            }
+        }
     }
 }
 

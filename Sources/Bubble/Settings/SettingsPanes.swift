@@ -68,7 +68,7 @@ struct ScreenToolsPane: View {
     @AppStorage("cleanScreenMinutes") private var cleanScreenMinutes = 2
 
     var body: some View {
-        SettingsGroup(footer: "Both are in the Bubble menu at the top of the sidebar.") {
+        SettingsGroup(footer: "Both are in the menu under the Bubble logo at the left of the tab bar.") {
             SettingRow(symbol: "cup.and.saucer.fill", tint: Color(hex: 0xD9873E), title: "Keep Screen On",
                        detail: (KeepAwake.Mode(rawValue: keepAwakeMode) ?? .screenAndWork).detail) {
                 Picker("Keep Screen On", selection: $keepAwakeMode) {
