@@ -167,8 +167,7 @@ final class AnalyzeModel {
         do {
             try FileManager.default.trashItem(at: URL(fileURLWithPath: entry.path), resultingItemURL: nil)
         } catch {
-            let alert = NSAlert(error: error)
-            alert.runModal()
+            _ = Dialogs.run(NSAlert(error: error))
             return
         }
         // Sizes of every ancestor changed; drop cached levels and rescan the current one.

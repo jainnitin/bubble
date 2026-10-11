@@ -261,7 +261,7 @@ enum AdminPrompt {
             MainActor.assumeIsolated { NSApp.stopModal(withCode: .alertSecondButtonReturn) }
         }
         RunLoop.main.add(timer, forMode: .modalPanel)
-        let response = alert.runModal()
+        let response = Dialogs.run(alert)
         timer.invalidate()
         let pw = field.stringValue
         field.stringValue = ""

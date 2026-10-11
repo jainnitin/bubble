@@ -76,7 +76,8 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>NSAppleEventsUsageDescription</key><string>Mole, which Bubble runs, asks System Events and Finder which apps are open and quits apps before removing them.</string>
     <key>SUFeedURL</key><string>$SU_FEED_URL</string>
     <key>SUPublicEDKey</key><string>$SU_PUBLIC_ED_KEY</string>
-    <!-- No SUEnableAutomaticChecks: Sparkle asks on the second launch whether to check for updates. -->
+    <!-- Checks daily without asking first; Settings has the switch to turn it off. -->
+    <key>SUEnableAutomaticChecks</key><true/>
     <key>SUEnableSystemProfiling</key><false/>
     <key>SUScheduledCheckInterval</key><integer>86400</integer>
     <key>SURequireSignedFeed</key><true/>

@@ -134,8 +134,13 @@ struct RootView: View {
         }
         .toolbar(removing: .sidebarToggle)
         .tint(Palette.accent)
+        .background(CenteredSheets())
         .sheet(isPresented: $showDoctor) { DoctorSheet().preferredColorScheme(.dark) }
         .onReceive(NotificationCenter.default.publisher(for: .bubbleShowDoctor)) { _ in showDoctor = true }
+        #if BUBBLE_DEV
+        // Dev hook: `--args -showCheckup YES` opens Checkup on launch (for screenshots).
+        .task { if UserDefaults.standard.bool(forKey: "showCheckup") { showDoctor = true } }
+        #endif
     }
 
     // Keep each screen alive so scans and running jobs survive switching sections.

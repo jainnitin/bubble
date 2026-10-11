@@ -43,8 +43,8 @@ final class Updater {
     }
 
     /// Sparkle's own setting (saved as SUEnableAutomaticChecks in Bubble's defaults), read
-    /// live from Sparkle. Without SUEnableAutomaticChecks in Info.plist, Sparkle asks on the
-    /// second launch before checking; this toggle answers that question from Settings.
+    /// live from Sparkle. Info.plist turns it on by default, so Sparkle never asks; this toggle
+    /// turns it off.
     var automaticallyChecksForUpdates: Bool {
         get {
             access(keyPath: \.automaticallyChecksForUpdates)

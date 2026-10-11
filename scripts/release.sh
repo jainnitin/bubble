@@ -36,7 +36,7 @@ fi
 codesign -dv build/Bubble.app 2>&1 | grep -q 'flags=.*runtime' || { echo "not signed with the hardened runtime" >&2; exit 1; }
 
 if [ "$SKIP_NOTARIZE" != "1" ]; then
-    codesign -dv build/Bubble.app 2>&1 | grep -q '^Authority=Developer ID Application' \
+    codesign -dvv build/Bubble.app 2>&1 | grep -q '^Authority=Developer ID Application' \
         || { echo "Not signed with a Developer ID; can't notarize. (SKIP_NOTARIZE=1 for a local test build.)" >&2; exit 1; }
     if [ -n "$APPLE_API_KEY_PATH" ]; then
         set -- --key "$APPLE_API_KEY_PATH" --key-id "$APPLE_API_KEY_ID" --issuer "$APPLE_API_ISSUER_ID"

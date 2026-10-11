@@ -1,4 +1,4 @@
-import Foundation
+import AppKit
 import Observation
 
 /// One line of `mo status --watch` (NDJSON). Every field is optional so a CLI change
@@ -57,27 +57,80 @@ final class StatusModel {
     /// Hottest CPU reading in the last five minutes.
     var cpuTempPeak: Double? { cpuTempPeaks.map(\.1).max() }
 
-    private var task: Task<Void, Never>?
+    private var watchTask: Task<Void, Never>?
+    private var nativeTask: Task<Void, Never>?
     private let historyLength = 60
 
+    /// How hard to sample. Nobody looking means no work: Bubble idles near zero CPU.
+    enum Pace: Equatable {
+        /// A Bubble window or the menu bar panel is on screen: Mole every second, plus
+        /// temperatures, fans and the process list.
+        case live
+        /// No window, but the menu bar shows CPU: Mole every 5 seconds, nothing else.
+        case background
+        /// No window and an icon-only menu bar: nothing runs.
+        case off
+    }
+    private(set) var pace: Pace?
+    private var observers: [NSObjectProtocol] = []
+
     func start() {
-        guard task == nil, Shell.mo != nil else { return }
-        task = Task { [weak self] in
-            while !Task.isCancelled {
-                for await line in Shell.moLines(["status", "--watch", "--interval", "1s"]) {
-                    self?.ingest(line)
+        guard observers.isEmpty else { return }
+        Task { await refreshHistory() }
+        let nc = NotificationCenter.default
+        for name in [NSWindow.didChangeOcclusionStateNotification, NSWindow.willCloseNotification,
+                     NSApplication.didHideNotification, NSApplication.didUnhideNotification,
+                     UserDefaults.didChangeNotification] {
+            observers.append(nc.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                // willClose fires before the window is gone; look again on the next turn.
+                DispatchQueue.main.async { MainActor.assumeIsolated { self?.updatePace() } }
+            })
+        }
+        updatePace()
+    }
+
+    private func updatePace() {
+        let onScreen = NSApp.windows.contains {
+            $0.isVisible && $0.occlusionState.contains(.visible) && !$0.className.contains("StatusBar")
+        }
+        let defaults = UserDefaults.standard
+        let showsNumbers = defaults.object(forKey: "showMenuBarIcon") as? Bool ?? true
+            && (defaults.string(forKey: "menuBarDisplay") ?? "icon") != "icon"
+        setPace(onScreen ? .live : showsNumbers ? .background : .off)
+    }
+
+    private func setPace(_ new: Pace) {
+        guard new != pace, Shell.mo != nil else { return }
+        let old = pace
+        pace = new
+        if new == .off || old == .off || old == nil || (new == .live) != (old == .live) {
+            watchTask?.cancel()
+            watchTask = nil
+        }
+        if new != .off, watchTask == nil {
+            let interval = new == .live ? "1s" : "5s"
+            watchTask = Task { [weak self] in
+                while !Task.isCancelled {
+                    for await line in Shell.moLines(["status", "--watch", "--interval", interval]) {
+                        guard !Task.isCancelled else { break }
+                        self?.ingest(line)
+                    }
+                    // The stream ended (e.g. mo was upgraded); restart after a pause.
+                    try? await Task.sleep(for: .seconds(3))
                 }
-                // The stream ended (e.g. mo was upgraded); restart after a pause.
-                try? await Task.sleep(for: .seconds(3))
             }
         }
-        Task { await refreshHistory() }
-        Task { [weak self] in
-            while !Task.isCancelled {
-                let reading = await Task.detached { SMCReader.shared.read() }.value
-                let procs = await ProcessSampler.sample()
-                self?.ingestNative(reading, procs)
-                try? await Task.sleep(for: .seconds(2))
+        nativeTask?.cancel()
+        nativeTask = nil
+        if new == .live {
+            nativeTask = Task { [weak self] in
+                while !Task.isCancelled {
+                    let reading = await Task.detached { SMCReader.shared.read() }.value
+                    let procs = await ProcessSampler.sample()
+                    guard !Task.isCancelled else { break }
+                    self?.ingestNative(reading, procs)
+                    try? await Task.sleep(for: .seconds(2))
+                }
             }
         }
     }

@@ -2,7 +2,6 @@ import SwiftUI
 
 struct CleanView: View {
     @State private var model = CleanModel()
-    @State private var confirm = false
     @State private var hideFDA = false
     @State private var shownBytes: Double = 0
     @State private var showFoundAction = false
@@ -11,7 +10,7 @@ struct CleanView: View {
     var body: some View {
         ZStack(alignment: .bottom) {
             if model.reviewing {
-                CleanReview(model: model, confirm: $confirm)
+                CleanReview(model: model)
                     .transition(reduceMotion ? .opacity : .opacity.combined(with: .scale(scale: 0.98)))
             } else {
                 hero.transition(.opacity)
@@ -38,11 +37,6 @@ struct CleanView: View {
         .onReceive(NotificationCenter.default.publisher(for: .bubbleRefresh)) { note in
             guard note.object as? Tab == .clean, model.phase != .cleaning else { return }
             model.scan()
-        }
-        .confirmationDialog("Permanently clean \(Fmt.bytes(model.selectedBytes))?", isPresented: $confirm) {
-            Button("Clean \(model.selectedItems.count) items", role: .destructive) { model.clean() }
-        } message: {
-            Text("Mole deletes these files permanently; they don't go to the Trash. Caches are rebuilt by apps as needed.")
         }
         .alert("Can't skip unchecked items", isPresented: Binding(get: { model.error != nil }, set: { if !$0 { model.error = nil } })) {
             Button("OK") { model.error = nil }
@@ -116,7 +110,6 @@ struct CleanView: View {
 
 struct CleanReview: View {
     @Bindable var model: CleanModel
-    @Binding var confirm: Bool
     @State private var expanded: Set<String> = []
 
     var body: some View {
@@ -152,8 +145,14 @@ struct CleanReview: View {
                 LinkButton(title: "None", color: Palette.accent) { model.selectNone() }
                 LinkButton(title: "Recommended", color: Palette.accent) { model.applyRecommended() }
                 Spacer()
-                PillButton(title: "Permanently clean \(Fmt.bytes(model.selectedBytes))", width: 320,
-                           disabled: model.selectedItems.isEmpty) { confirm = true }
+                // The review screen is the confirmation: no second dialog.
+                VStack(alignment: .trailing, spacing: 6) {
+                    PillButton(title: "Permanently clean \(Fmt.bytes(model.selectedBytes))", width: 320,
+                               disabled: model.selectedItems.isEmpty) { model.clean() }
+                    Text("Deleted, not moved to the Trash. Apps rebuild caches as needed.")
+                        .font(.ui(.caption)).foregroundStyle(Palette.tertiary)
+                        .lineLimit(1).fixedSize()
+                }
             }
             .font(.ui(.body))
             .padding(.top, Space.l)

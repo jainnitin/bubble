@@ -106,9 +106,9 @@ The app icon is drawn in code; see [scripts/icon/README.md](scripts/icon/README.
 Bubble has no analytics, telemetry or crash reporting, and no account.
 
 **Network.** Bubble itself only goes online for these:
-- **Its own updates.** Sparkle fetches `appcast.xml` from GitHub Releases once a day, only if you
-  allow it (Sparkle asks on the second launch; change it under **Settings ▸ Mole ▸ Automatically
-  check for updates**), or when you choose **Check for Updates…**.
+- **Its own updates.** Sparkle fetches `appcast.xml` from GitHub Releases once a day (turn
+  this off under **Settings ▸ Mole ▸ Automatically check for updates**), or when you choose
+  **Check for Updates…**. It sends no information about your Mac.
 - **Apps ▸ Updates**, only when you open it: the App Store lookup API (`itunes.apple.com`, with
   your App Store apps' bundle IDs), each Sparkle-based app's own update feed, and
   `brew outdated` for Homebrew casks. These requests send no cookies and a generic User-Agent.
