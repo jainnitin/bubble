@@ -93,7 +93,7 @@ final class CleanModel {
 
     var phase: Phase = .idle
     var reviewing = false
-    var categories: [CleanCategory] = []
+    var categories: [CleanCategory] = [] { didSet { reindex() } }
     /// Governing keys (`governingKey(_:)`) of unchecked items.
     var deselected: Set<String> = []
     var currentStep = ""
@@ -112,6 +112,12 @@ final class CleanModel {
     private var job: Task<Void, Never>?
     private var toolHits: [ToolHit] = []
     private var sectionOrder: [String] = []
+    /// Each covered row's governing key and the first item listed under each id, rebuilt
+    /// when `categories` changes. The review asks `isSelected` for every row on every
+    /// render; working the key out from scratch each time was quadratic (seconds of a
+    /// frozen window with a few thousand rows).
+    @ObservationIgnored private var governing: [CleanItem: String] = [:]
+    @ObservationIgnored private var firstByID: [String: CleanItem] = [:]
 
     var allItems: [CleanItem] { categories.flatMap(\.items) }
     var totalBytes: Double { categories.reduce(0) { $0 + $1.bytes } }
@@ -128,42 +134,59 @@ final class CleanModel {
         // Notices describe this scan only; a rescan after granting access clears them.
         needsFullDiskAccess = false
         needsAdmin = false
-        let profile = PrivacyGuard.currentProfile(quietAppleEvents: true)
-        guarded = profile != nil && profile != PrivacyGuard.appleEventsOnlyProfile
-        skipped = guarded ? PrivacyGuard.cleanSkipped().map { SkippedPlace(name: $0.name, reason: $0.detail, needsFullDiskAccess: true) } : []
+        guarded = false
+        skipped = []
         error = nil
         log = []
         toolHits = []
         sectionOrder = []
         currentStep = "Starting"
         job = Task {
+            // The Full Disk Access probe and the one-time sandbox check open files and
+            // start a process: off the main thread.
+            let profile = await Task.detached { PrivacyGuard.currentProfile(quietAppleEvents: true) }.value
+            guard !Task.isCancelled else { return }
+            guarded = profile != nil && profile != PrivacyGuard.appleEventsOnlyProfile
+            skipped = guarded ? PrivacyGuard.cleanSkipped().map { SkippedPlace(name: $0.name, reason: $0.detail, needsFullDiskAccess: true) } : []
+            // A tool's cache path (`npm config get cache`, `pip3 cache dir`…) is looked up
+            // as soon as Mole names the tool, while the rest of the scan runs.
+            var lookups: [String: Task<[String]?, Never>] = [:]
             for await line in Shell.moLines(["clean", "--dry-run"], sandbox: profile) {
                 ingest(line)
                 if let hit = Self.parseToolLine(line) {
                     toolHits.append(ToolHit(section: currentStep, name: hit.name, sizeText: hit.sizeText))
+                    if lookups[hit.name] == nil { lookups[hit.name] = Self.lookup(hit.name) }
                 }
             }
             guard !Task.isCancelled else { return }
-            var cats = Self.parsePreview()
-            let tools = await Self.toolItems(toolHits)
-            guard !Task.isCancelled else { return }
-            for (section, item) in tools {
-                if let i = cats.firstIndex(where: { $0.name == section }) {
-                    cats[i].items.append(item)
-                } else {
-                    cats.append(CleanCategory(name: section, items: [item]))
-                }
-            }
+            let tools = await Self.toolItems(toolHits, lookups: lookups)
             let order = sectionOrder
-            categories = cats.enumerated().sorted { a, b in
-                let ia = order.firstIndex(of: a.element.name) ?? Int.max
-                let ib = order.firstIndex(of: b.element.name) ?? Int.max
-                return ia != ib ? ia < ib : a.offset < b.offset
-            }.map(\.element)
+            // Reading and parsing clean-list.txt can take a while for a long list.
+            let cats = await Task.detached { Self.arrange(Self.parsePreview(), tools: tools, order: order) }.value
+            guard !Task.isCancelled else { return }
+            categories = cats
             applyRecommended()
             phase = categories.isEmpty ? .done : .found
             if categories.isEmpty { freedText = "Nothing to clean" }
         }
+    }
+
+    /// The preview's categories plus the tool-run items, in the order Mole scanned them.
+    nonisolated static func arrange(_ preview: [CleanCategory], tools: [(section: String, item: CleanItem)],
+                                    order: [String]) -> [CleanCategory] {
+        var cats = preview
+        for (section, item) in tools {
+            if let i = cats.firstIndex(where: { $0.name == section }) {
+                cats[i].items.append(item)
+            } else {
+                cats.append(CleanCategory(name: section, items: [item]))
+            }
+        }
+        return cats.enumerated().sorted { a, b in
+            let ia = order.firstIndex(of: a.element.name) ?? Int.max
+            let ib = order.firstIndex(of: b.element.name) ?? Int.max
+            return ia != ib ? ia < ib : a.offset < b.offset
+        }.map(\.element)
     }
 
     func cancel() {
@@ -247,11 +270,12 @@ final class CleanModel {
             currentStep = line.dropFirst().trimmingCharacters(in: .whitespaces)
             if !sectionOrder.contains(currentStep) { sectionOrder.append(currentStep) }
         }
-        if line.contains("Full Disk Access") { needsFullDiskAccess = true }
+        // Observation reports every assignment, even of an equal value: set flags only once.
+        if !needsFullDiskAccess, line.contains("Full Disk Access") { needsFullDiskAccess = true }
         if let s = Self.parseSkipLine(line), !skipped.contains(where: { $0.name.caseInsensitiveCompare(s.name) == .orderedSame }) {
             skipped.append(s)
         }
-        if line.contains("need sudo") || line.contains("requires sudo") { needsAdmin = true }
+        if !needsAdmin, line.contains("need sudo") || line.contains("requires sudo") { needsAdmin = true }
     }
 
     // MARK: Skipped places
@@ -288,14 +312,15 @@ final class CleanModel {
     /// The key whose presence in `deselected` decides this item: its own id, or for
     /// a "counted under" row, the id of the top-most listed parent containing it.
     func governingKey(_ item: CleanItem) -> String {
-        Self.governingKey(item, itemsByPath: itemsByPath)
+        guard item.coveredBy != nil else { return item.id }
+        return governing[item] ?? Self.governingKey(item, itemsByPath: itemsByPath)
     }
 
     /// The listed item whose checkbox decides a "counted under" row (nil for normal rows).
     func governingItem(_ item: CleanItem) -> CleanItem? {
         guard item.coveredBy != nil else { return nil }
         let key = governingKey(item)
-        return allItems.first { $0.id == key }
+        return firstByID[key] ?? allItems.first { $0.id == key }
     }
 
     /// Rows counted under `parent` (from any category), with their category names.
@@ -334,6 +359,18 @@ final class CleanModel {
         var map: [String: CleanItem] = [:]
         for item in allItems where !item.toolRun { map[item.path] = item }
         return map
+    }
+
+    private func reindex() {
+        let byPath = itemsByPath
+        var keys: [CleanItem: String] = [:]
+        var first: [String: CleanItem] = [:]
+        for item in allItems {
+            if item.coveredBy != nil { keys[item] = Self.governingKey(item, itemsByPath: byPath) }
+            if first[item.id] == nil { first[item.id] = item }
+        }
+        governing = keys
+        firstByID = first
     }
 
     nonisolated static func governingKey(_ item: CleanItem, itemsByPath: [String: CleanItem]) -> String {
@@ -424,13 +461,22 @@ final class CleanModel {
         return nil
     }
 
+    /// Starts working out one tool's whitelist path(s), off the main thread.
+    nonisolated static func lookup(_ name: String) -> Task<[String]?, Never> {
+        Task.detached(priority: .userInitiated) { await ToolCaches.whitelistPaths(for: name) }
+    }
+
     /// Builds one item per distinct (section, tool) and works out the whitelist
-    /// path(s) Mole checks before running it.
-    static func toolItems(_ hits: [ToolHit]) async -> [(section: String, item: CleanItem)] {
+    /// path(s) Mole checks before running it. Tools without a lookup in `lookups` are
+    /// looked up here, all at once: each can launch the tool (npm takes a moment).
+    nonisolated static func toolItems(_ hits: [ToolHit], lookups: [String: Task<[String]?, Never>] = [:]) async
+        -> [(section: String, item: CleanItem)] {
+        var lookups = lookups
+        for hit in hits where lookups[hit.name] == nil { lookups[hit.name] = lookup(hit.name) }
         var out: [(String, CleanItem)] = []
         var seen = Set<String>()
         for hit in hits where seen.insert(hit.section + "\u{0}" + hit.name).inserted {
-            let paths = await ToolCaches.whitelistPaths(for: hit.name)
+            let paths = await lookups[hit.name]?.value
             let usable = paths.flatMap { $0.isEmpty || !Whitelist.rejectedPaths($0).isEmpty ? nil : $0 }
             let item = CleanItem(
                 path: usable?.first ?? hit.name,

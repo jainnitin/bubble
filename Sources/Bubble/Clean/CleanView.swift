@@ -147,6 +147,10 @@ struct CleanView: View {
 struct CleanReview: View {
     @Bindable var model: CleanModel
     @State private var expanded: Set<String> = []
+    /// How many rows an open category shows (`rowPage` until "Show more").
+    @State private var shownRows: [String: Int] = [:]
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    static let rowPage = 200
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -171,11 +175,12 @@ struct CleanReview: View {
             }
 
             Divider().overlay(Palette.cardStroke)
+            let selected = model.selectedItems
             HStack(spacing: Space.m) {
-                Text("\(model.selectedItems.count) of \(model.allItems.count) selected").font(.num(.body, .semibold))
+                Text("\(selected.count) of \(model.allItems.count) selected").font(.num(.body, .semibold))
                     .lineLimit(1).fixedSize()
                     .contentTransition(.numericText())
-                    .motion(model.selectedItems.count)
+                    .motion(selected.count)
                     .padding(.trailing, Space.s)
                 Text("Select").foregroundStyle(Palette.tertiary)
                 LinkButton(title: "All", color: Palette.accent) { model.selectAll() }
@@ -184,8 +189,8 @@ struct CleanReview: View {
                 Spacer()
                 // The review screen is the confirmation: no second dialog.
                 VStack(alignment: .trailing, spacing: 6) {
-                    PillButton(title: "Permanently clean \(Fmt.bytes(model.selectedBytes))", width: 320,
-                               disabled: model.selectedItems.isEmpty) { model.clean() }
+                    PillButton(title: "Permanently clean \(Fmt.bytes(selected.reduce(0) { $0 + $1.bytes }))", width: 320,
+                               disabled: selected.isEmpty) { model.clean() }
                     Text("Deleted, not moved to the Trash. Apps rebuild caches as needed.")
                         .font(.ui(.caption)).foregroundStyle(Palette.tertiary)
                         .lineLimit(1).fixedSize()
@@ -204,11 +209,16 @@ struct CleanReview: View {
     }
 
     private func category(_ c: CleanCategory) -> some View {
-        let sel = model.selectedCount(c)
-        let selBytes = c.items.filter(model.isSelected).reduce(0) { $0 + $1.bytes }
+        let selItems = c.items.filter(model.isSelected)
+        let sel = selItems.count
+        let selBytes = selItems.reduce(0) { $0 + $1.bytes }
         let open = expanded.contains(c.name)
         let toggleOpen = {
-            if open { expanded.remove(c.name) } else { expanded.insert(c.name) }
+            // One animation for the whole list, so the panels below move in step with
+            // this one's height instead of jumping while its rows fade.
+            withAnimation(reduceMotion ? Motion.reduced : Motion.spring) {
+                if open { expanded.remove(c.name) } else { expanded.insert(c.name) }
+            }
         }
         return VStack(spacing: 0) {
             HStack(spacing: Space.l) {
@@ -240,8 +250,10 @@ struct CleanReview: View {
             .padding(.horizontal, Space.l).padding(.vertical, Space.m)
 
             if open {
+                let limit = shownRows[c.name] ?? Self.rowPage
                 VStack(spacing: 0) {
-                    ForEach(c.items) { item in
+                    // By position: a path Mole lists twice must not give two rows one identity.
+                    ForEach(Array(c.items.prefix(limit).enumerated()), id: \.offset) { _, item in
                         HStack(spacing: Space.m) {
                             if !item.alwaysRuns {
                                 CheckBox(on: model.isSelected(item), tint: Palette.accent,
@@ -267,14 +279,32 @@ struct CleanReview: View {
                                         .font(.ui(.caption)).foregroundStyle(Palette.tertiary).lineLimit(1).truncationMode(.middle)
                                 }
                             }
-                            Spacer()
-                            if item.count > 1 { Text("\(item.count) items").font(.ui(.secondary)).foregroundStyle(Palette.tertiary) }
-                            Text(Fmt.parseSize(item.sizeText).map(Fmt.bytes) ?? item.sizeText).font(.num(.secondary)).foregroundStyle(Palette.secondary).frame(width: 80, alignment: .trailing)
+                            Spacer(minLength: Space.s)
+                            if item.count > 1 {
+                                Text("\(item.count) items").font(.ui(.secondary)).foregroundStyle(Palette.tertiary)
+                                    .lineLimit(1).fixedSize()
+                            }
+                            Text(Fmt.parseSize(item.sizeText).map(Fmt.bytes) ?? item.sizeText).font(.num(.secondary)).foregroundStyle(Palette.secondary)
+                                .lineLimit(1).frame(minWidth: 80, alignment: .trailing).fixedSize()
                         }
                         .padding(.horizontal, Space.l).padding(.vertical, 5)
                         .contextMenu {
                             Button("Reveal in Finder") { Finder.reveal(item.path) }
                         }
+                    }
+                    // Rows come in pages: thousands at once would stall the window.
+                    if c.items.count > limit {
+                        HStack(spacing: Space.m) {
+                            LinkButton(title: "Show \(min(Self.rowPage, c.items.count - limit)) more", color: Palette.accent) {
+                                shownRows[c.name] = limit + Self.rowPage
+                            }
+                            if c.items.count - limit > Self.rowPage {
+                                LinkButton(title: "Show all \(c.items.count)", color: Palette.accent) { shownRows[c.name] = c.items.count }
+                            }
+                            Spacer()
+                        }
+                        .font(.ui(.secondary, .medium))
+                        .padding(.horizontal, Space.l).padding(.vertical, Space.s)
                     }
                 }
                 .padding(.leading, 34)
@@ -282,8 +312,9 @@ struct CleanReview: View {
                 .transition(.opacity)
             }
         }
+        // Rows fading in or out stay inside the panel while its height animates.
+        .clipped()
         .panel(radius: Radius.row)
-        .motion(open)
         .motion(sel)
     }
 }

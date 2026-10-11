@@ -315,32 +315,64 @@ enum Shell {
 
     /// Streams stdout+stderr line by line, with ANSI codes removed.
     /// Cancelling the consuming task terminates the process.
+    ///
+    /// The trust check (which walks Mole's library folder) and the launch happen on a
+    /// background queue, never on the caller's thread, which is usually the main one.
     static func lines(_ exe: String, _ args: [String], input: String? = nil, sandbox: String? = nil) -> AsyncStream<String> {
         AsyncStream { cont in
-            if let why = refusal(exe) {
-                cont.yield(why)
-                cont.finish()
-                return
+            let gate = LaunchGate()
+            cont.onTermination = { _ in gate.cancel() }
+            DispatchQueue.global(qos: .userInitiated).async {
+                if let why = refusal(exe) {
+                    cont.yield(why)
+                    cont.finish()
+                    return
+                }
+                let run = PrivacyGuard.command(exe, args, profile: sandbox)
+                let p = makeProcess(run.exe, run.args)
+                let pipe = Pipe()
+                p.standardOutput = pipe
+                p.standardError = pipe
+                p.standardInput = inputHandle(input)
+                readLines(from: pipe, onLines: { lines in
+                    for line in lines { cont.yield(line) }
+                }, onEnd: { rest in
+                    for line in rest { cont.yield(line) }
+                    cont.finish()
+                })
+                do {
+                    if try !gate.launch(p) {
+                        pipe.fileHandleForReading.readabilityHandler = nil
+                        cont.finish()
+                    }
+                } catch {
+                    cont.yield("Failed to launch \(exe): \(error.localizedDescription)")
+                    cont.finish()
+                }
             }
-            let run = PrivacyGuard.command(exe, args, profile: sandbox)
-            let p = makeProcess(run.exe, run.args)
-            let pipe = Pipe()
-            p.standardOutput = pipe
-            p.standardError = pipe
-            p.standardInput = inputHandle(input)
-            readLines(from: pipe, onLines: { lines in
-                for line in lines { cont.yield(line) }
-            }, onEnd: { rest in
-                for line in rest { cont.yield(line) }
-                cont.finish()
-            })
-            cont.onTermination = { _ in
-                if p.isRunning { p.terminate() }
-            }
-            do { try p.run() } catch {
-                cont.yield("Failed to launch \(exe): \(error.localizedDescription)")
-                cont.finish()
-            }
+        }
+    }
+
+    /// Starts a process unless its stream was already cancelled, and stops it when the
+    /// stream is cancelled later, with no gap between the two where it could be missed.
+    private final class LaunchGate: @unchecked Sendable {
+        private let lock = NSLock()
+        private var cancelled = false
+        private var process: Process?
+
+        /// False when the stream was cancelled first and nothing was started.
+        func launch(_ p: Process) throws -> Bool {
+            lock.lock(); defer { lock.unlock() }
+            guard !cancelled else { return false }
+            try p.run()
+            process = p
+            return true
+        }
+
+        func cancel() {
+            lock.lock(); defer { lock.unlock() }
+            cancelled = true
+            if let process, process.isRunning { process.terminate() }
         }
     }
 
