@@ -565,7 +565,9 @@ final class AppRemovalTests: XCTestCase {
         try mac.app("Beta", id: "com.example.beta", bytes: 4096)
         try mac.file(mac.lib("Caches/com.example.alpha"))
         try mac.file(mac.sys("LaunchDaemons/com.example.beta.plist"))
-        let m = UninstallModel(roots: mac.roots, remover: mac.remover(admin: { _, _ in throw Admin.Failure.cancelled }))
+        let defaults = UserDefaults(suiteName: "BubbleTests.\(UUID().uuidString)")!
+        let m = UninstallModel(roots: mac.roots, remover: mac.remover(admin: { _, _ in throw Admin.Failure.cancelled }),
+                               historyDefaults: defaults)
         await m.load()
         XCTAssertEqual(Set(m.apps.map(\.name)), ["Alpha", "Beta"])
         XCTAssertTrue(m.apps.allSatisfy(\.sized))
@@ -575,6 +577,7 @@ final class AppRemovalTests: XCTestCase {
         // Beta's app went to the Trash, but its daemon needed admin rights, which were cancelled.
         XCTAssertEqual(m.apps.map(\.name), [])
         XCTAssertEqual(Set(m.summary?.removed ?? []), ["Alpha", "Beta"])
+        XCTAssertEqual(HistoryTotals.uninstallCount(defaults: defaults), 2)
         XCTAssertEqual(m.summary?.failures.count, 1)
         XCTAssertTrue(m.summary?.movedToTrash == true)
         XCTAssertGreaterThan(m.summary?.freed ?? 0, 0)

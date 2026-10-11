@@ -79,9 +79,9 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test    # unit te
 Give Bubble **Full Disk Access** (System Settings ▸ Privacy & Security) so Mole can see the Trash,
 Mail and other protected caches.
 
-Some tests run real processes in a pseudo-terminal (bash scripts standing in for Mole). The test
-that needs an installed Mole skips itself without one; `BUBBLE_LIVE_MOLE=1 swift test --filter
-LiveMoleTests` runs a read-only `mo uninstall --dry-run` through the prompt handling.
+Some tests run real processes in a pseudo-terminal (bash scripts standing in for Mole and sudo).
+The test that needs an installed Mole skips itself without one; `BUBBLE_LIVE_MOLE=1 swift test
+--filter LiveOptimizeWhitelistTests` runs a real `mo optimize --dry-run` with the temporary whitelist.
 
 **Dev builds.** `BUBBLE_DEV=1 scripts/bundle.sh` compiles in debug hooks that release builds don't
 contain (`release.sh` refuses to ship them). Pass them as launch arguments, for example
@@ -209,9 +209,10 @@ Sources/Bubble/
   Core/
     Shell.swift          runs child processes: fixed mo/brew paths, scrubbed environment,
                          system-first PATH, executable trust check, line streaming
-    PTY.swift            pseudo-terminal sessions, the sudo password dialog and prompt policy
+    PTY.swift            pseudo-terminal sessions and the prompt policy (declines prompts,
+                         ends sudo's without typing a password)
     Admin.swift          root scripts behind Touch ID (sudo) or the macOS authorization dialog
-    Safety.swift         pure guards: Move to Trash, uninstall matching, command arguments, links
+    Safety.swift         pure guards: Move to Trash, app names, command arguments, links
     Theme.swift          palette, type scale, spacing, motion and shared modifiers
     Components.swift     shared views: cards, buttons, hero layout, log box, section header
     Bubble.swift         the bubble artwork (SwiftUI, and Core Animation for the hero)
@@ -221,7 +222,8 @@ Sources/Bubble/
     Format.swift         sizes, rates, dates and paths
   Onboarding/            Mole detection, install and update, and the setup screens
   Clean/                 scan parsing, selection rules, the temporary whitelist
-  Apps/                  Uninstall, Updates (appcasts, version comparison), Startup
+  Apps/                  Uninstall (native: AppLeftovers finds leftovers, AppRemover removes),
+                         Updates (appcasts, version comparison), Startup
   Optimize/              mo optimize, and the admin tasks Bubble runs itself
   Analyze/               navigation model, view and squarified treemap
   Status/                mo status model, native sensors (SMC, GPU, processes), cards, menu bar panel

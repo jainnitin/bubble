@@ -222,8 +222,9 @@ final class ShellSecurityTests: XCTestCase {
     }
 }
 
-/// The password prompt: only this session's sudo prompt gets it, never after sudo moved on,
-/// and never into the output Bubble shows.
+/// sudo's prompt: Bubble never types a password into it. Only this session's own sudo prompt
+/// counts as sudo, a look-alike gets nothing but an empty line, and no reply lands after
+/// the process moved on.
 @MainActor
 final class SudoPromptTests: XCTestCase {
     func testStalenessRule() {
@@ -238,90 +239,35 @@ final class SudoPromptTests: XCTestCase {
         XCTAssertEqual(PromptResponder.classify(tok, sudoPrompt: tok), .sudoPassword)
         XCTAssertEqual(PromptResponder.classify("Password:", sudoPrompt: tok), .otherPassword)
         XCTAssertEqual(PromptResponder.classify("[sudo] password for nitin:", sudoPrompt: tok), .otherPassword)
-        XCTAssertEqual(PromptResponder.decide(kind: .otherPassword, policy: .optimize, matchOK: false, proceedConfirmed: false), .decline("\n"))
+        XCTAssertEqual(PromptResponder.decide(kind: .otherPassword, policy: .optimize), .decline("\n"))
         XCTAssertNotEqual(PTYSession.makeSudoPrompt(), PTYSession.makeSudoPrompt())
         XCTAssertTrue(PTYSession.makeSudoPrompt().hasSuffix(":"))
         XCTAssertFalse(PTYSession.makeSudoPrompt().contains("%"))
     }
 
-    func testDialogCopy() {
-        let r = AdminRequest(command: "mo optimize", reason: "Refreshing DNS needs admin rights.", retry: false)
-        XCTAssertTrue(r.title.contains("Mole (mo optimize) needs your administrator password"))
-        XCTAssertTrue(r.message.contains("Bubble types it into sudo once and doesn't save it."))
-        XCTAssertTrue(r.message.hasPrefix("Refreshing DNS"))
-        XCTAssertTrue(AdminRequest(command: "mo optimize", reason: "", retry: true).title.hasPrefix("That password didn't work"))
-        XCTAssertEqual(AdminPrompt.timeout, 120)
-    }
-
-    func testRedaction() {
-        let d = SHA256.hash(data: Data("hunter2".utf8))
-        XCTAssertEqual(PTYSession.redact("Password:hunter2", length: 7, digest: d), "Password:••••")
-        XCTAssertEqual(PTYSession.redact("hunter2 and hunter2", length: 7, digest: d), "•••• and ••••")
-        XCTAssertEqual(PTYSession.redact("hunter", length: 7, digest: d), "hunter")
-    }
-
-    /// Only `mo uninstall` still types a password, and only after the user's exact
-    /// selection was confirmed, so each script starts with that confirmation.
-    private static let confirmed = #"""
-    echo "◎ Matched 1 app(s):"
-    echo "1. Xcode  3.96GB  |  Last: 5d ago"
-    echo
-    printf "Proceed with uninstallation? [y/N] "; read -r a
-
-    """#
-
-    private func run(_ script: String, answer: @escaping @MainActor (AdminRequest) -> String?) async -> (lines: [String], responder: PromptResponder, asked: [AdminRequest]) {
-        let session = PTYSession("/bin/bash", ["-c", Self.confirmed + script])
-        let responder = PromptResponder(reason: "Test reason.", policy: .uninstall(expectedApps: ["Xcode"]))
-        var asked: [AdminRequest] = []
-        responder.askPassword = { asked.append($0); return answer($0) }
+    private func run(_ script: String, policy: PromptPolicy) async -> (lines: [String], responder: PromptResponder) {
+        let session = PTYSession("/bin/bash", ["-c", script])
+        let responder = PromptResponder(policy: policy)
         var lines: [String] = []
         for await line in session.lines {
             if !responder.handle(line, session) { lines.append(line) }
         }
-        return (lines, responder, asked)
+        return (lines, responder)
     }
 
-    func testPasswordReachesCurrentSudoPromptButNotTheLog() async {
-        // `read` with the tty echo on stands in for a sudo that already exited: the
-        // password is echoed, and must be scrubbed from what Bubble shows.
-        let script = #"printf '%s' "$SUDO_PROMPT"; IFS= read -r p; echo "len=${#p}"; echo "echo:$p""#
-        let (lines, r, asked) = await run(script) { _ in "pw-secret-123" }
-        XCTAssertEqual(asked.count, 1)
-        XCTAssertEqual(asked.first?.command, "mo -c")
-        XCTAssertTrue(lines.contains("len=13"), "\(lines)")
-        XCTAssertFalse(lines.contains { $0.contains("pw-secret-123") }, "\(lines)")
-        XCTAssertTrue(lines.contains("echo:••••"), "\(lines)")
-        XCTAssertEqual(r.stalePasswordsDiscarded, 0)
-    }
-
-    func testPasswordDiscardedWhenOutputArrivedWhileDialogWasOpen() async {
-        let script = #"printf '%s' "$SUDO_PROMPT"; sleep 0.4; echo moved-on; IFS= read -r -t 3 p; echo "len=${#p}""#
-        let (lines, r, _) = await run(script) { _ in
-            Thread.sleep(forTimeInterval: 1.0)  // the user takes a while; sudo moves on meanwhile
-            return "pw-secret-123"
-        }
-        XCTAssertEqual(r.stalePasswordsDiscarded, 1)
-        XCTAssertTrue(lines.contains("moved-on"), "\(lines)")
-        XCTAssertTrue(lines.contains("len=0"), "\(lines)")
-        XCTAssertFalse(lines.contains { $0.contains("pw-secret") }, "\(lines)")
-    }
-
-    func testLookalikePasswordPromptNeverAsksTheUser() async {
+    func testLookalikePasswordPromptGetsNothing() async {
         let script = #"printf 'Password:'; IFS= read -r p; echo "len=${#p}""#
-        let (lines, r, asked) = await run(script) { _ in "pw" }
-        XCTAssertTrue(asked.isEmpty)
+        let (lines, r) = await run(script, policy: .optimize)
         XCTAssertTrue(lines.contains("len=0"), "\(lines)")
         XCTAssertEqual(r.skippedPrompts, ["Password:"])
+        XCTAssertFalse(r.adminSkipped)
     }
 
-    func testSkipEndsInput() async {
-        // Ctrl-D, not an empty line: sudo gives up at once instead of counting a failed
-        // attempt and asking again. `read` sees end of file (status 1).
-        let script = #"stty -echo; printf '%s' "$SUDO_PROMPT"; IFS= read -r p; echo "rc=$? len=${#p}""#  // sudo turns echo off
-        let (lines, _, asked) = await run(script) { _ in nil }
-        XCTAssertEqual(asked.count, 1)
-        XCTAssertTrue(lines.contains("rc=1 len=0"), "\(lines)")
+    func testRealSudoPromptGetsNothingInStrictPolicy() async {
+        let script = #"printf '%s' "$SUDO_PROMPT"; IFS= read -r p; echo "rc=$? len=${#p}""#
+        let (lines, r) = await run(script, policy: .strict)
+        XCTAssertTrue(lines.contains("rc=0 len=0"), "\(lines)")
+        XCTAssertEqual(r.skippedPrompts.count, 1)
     }
 }
 

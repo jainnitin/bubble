@@ -63,69 +63,13 @@ enum Safety {
         return "/" + out.joined(separator: "/")
     }
 
-    // MARK: Uninstall match check (used by PTY's `mo uninstall` prompt policy)
+    // MARK: App names
 
-    /// Parses Mole's confirmation block:
-    ///   ◎ Matched 2 app(s):
-    ///   1. Xcode  3.96GB  |  Last: 5d ago
-    ///   2. Claude Code URL Handler  4KB  |  Last: Today
-    /// Returns the display names, or nil when no "Matched" header was seen or the
-    /// number of rows doesn't equal the count in the header.
-    static func parseMatchedApps(_ lines: [String]) -> [String]? {
-        var expectedCount: Int?
-        var names: [String] = []
-        for raw in lines {
-            let line = raw.trimmingCharacters(in: .whitespaces)
-            if let n = matchedHeaderCount(line) {
-                // A later header starts a new block.
-                expectedCount = n
-                names = []
-                continue
-            }
-            guard let count = expectedCount, names.count < count else { continue }
-            if let name = matchedRowName(line, index: names.count + 1) { names.append(name) }
-        }
-        guard let expectedCount, names.count == expectedCount else { return nil }
-        return names
-    }
-
-    /// "◎ Matched 3 app(s):" -> 3
-    static func matchedHeaderCount(_ line: String) -> Int? {
-        guard let r = line.range(of: "Matched "), line.hasSuffix(" app(s):") else { return nil }
-        let middle = line[r.upperBound...].dropLast(" app(s):".count)
-        return Int(middle)
-    }
-
-    /// "2. Claude Code URL Handler  4KB  |  Last: Today" -> "Claude Code URL Handler"
-    static func matchedRowName(_ line: String, index: Int) -> String? {
-        let prefix = "\(index). "
-        guard line.hasPrefix(prefix) else { return nil }
-        var body = Substring(line.dropFirst(prefix.count))
-        if let r = body.range(of: "  |  Last:", options: .backwards) { body = body[..<r.lowerBound] }
-        // Drop the size column: "Name  3.96GB".
-        if let r = body.range(of: "  ", options: .backwards) { body = body[..<r.lowerBound] }
-        let name = normalizeAppName(String(body))
-        return name.isEmpty ? nil : name
-    }
-
-    /// Trims whitespace and invisible format characters (Mole keeps e.g. the
+    /// Trims whitespace and invisible format characters (some apps keep e.g. the
     /// U+200E mark in "‎WhatsApp").
     static func normalizeAppName(_ s: String) -> String {
         let scalars = s.unicodeScalars.filter { $0.properties.generalCategory != .format }
         return String(String.UnicodeScalarView(scalars)).trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    /// Nil when Mole matched exactly the selected apps (as a multiset of display
-    /// names); otherwise a user-facing error.
-    static func matchMismatch(matched: [String]?, expected: [String]) -> String? {
-        guard let matched else {
-            return "Couldn't read which apps Mole matched, so nothing was removed."
-        }
-        let m = matched.map(normalizeAppName).sorted()
-        let e = expected.map(normalizeAppName).sorted()
-        if m == e { return nil }
-        let list = matched.isEmpty ? "none" : matched.map(normalizeAppName).joined(separator: ", ")
-        return "Mole matched different apps than you selected: \(list). Nothing was removed."
     }
 
     // MARK: Arguments and links

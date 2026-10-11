@@ -43,7 +43,7 @@ final class HistoryTotalsTests: XCTestCase {
     """
 
     func testDryRunsAndListingsAreNotCounted() {
-        let t = HistoryTotals(json: Data(Self.fixture.utf8), optimizeRuns: 0)
+        let t = HistoryTotals(json: Data(Self.fixture.utf8), optimizeRuns: 0, uninstalls: 0)
         XCTAssertEqual(t.uninstalled, 0)
         XCTAssertEqual(t.optimized, 0)
         XCTAssertEqual(t.cleanedBytes, 177.4e6, accuracy: 1)
@@ -59,7 +59,7 @@ final class HistoryTotalsTests: XCTestCase {
           {"command": "uninstall", "attribution": "command", "items": 0, "size": "0B"}
         ]}
         """
-        let t = HistoryTotals(json: Data(json.utf8), optimizeRuns: 0)
+        let t = HistoryTotals(json: Data(json.utf8), optimizeRuns: 0, uninstalls: 0)
         XCTAssertEqual(t.uninstalled, 1)
         XCTAssertEqual(t.cleanedBytes, 52.6e6 + 1e9, accuracy: 1)
     }
@@ -70,12 +70,29 @@ final class HistoryTotalsTests: XCTestCase {
         HistoryTotals.recordOptimizeRun(defaults: defaults)
         HistoryTotals.recordOptimizeRun(defaults: defaults)
         XCTAssertEqual(HistoryTotals.optimizeRunCount(defaults: defaults), 2)
-        let t = HistoryTotals(json: Data(Self.fixture.utf8), optimizeRuns: HistoryTotals.optimizeRunCount(defaults: defaults))
+        let t = HistoryTotals(json: Data(Self.fixture.utf8), optimizeRuns: HistoryTotals.optimizeRunCount(defaults: defaults), uninstalls: 0)
         XCTAssertEqual(t.optimized, 2)
     }
 
+    func testNativeUninstallsAddToMoleSessions() {
+        let defaults = UserDefaults(suiteName: "BubbleTests.\(UUID().uuidString)")!
+        HistoryTotals.recordUninstall(count: 2, defaults: defaults)
+        HistoryTotals.recordUninstall(count: 0, defaults: defaults)
+        HistoryTotals.recordUninstall(count: 1, defaults: defaults)
+        XCTAssertEqual(HistoryTotals.uninstallCount(defaults: defaults), 3)
+        let json = """
+        {"sessions": [
+          {"command": "uninstall", "attribution": "run", "items": 3, "size": "52.6MB",
+           "actions": {"removed": 1, "trashed": 2, "skipped": 0, "failed": 0, "rebuilt": 0, "other": 0}}
+        ]}
+        """
+        let t = HistoryTotals(json: Data(json.utf8), optimizeRuns: 0, uninstalls: HistoryTotals.uninstallCount(defaults: defaults))
+        XCTAssertEqual(t.uninstalled, 4)
+        XCTAssertEqual(HistoryTotals(json: Data("not json".utf8), optimizeRuns: 0, uninstalls: 3).uninstalled, 3)
+    }
+
     func testGarbageJSON() {
-        let t = HistoryTotals(json: Data("not json".utf8), optimizeRuns: 3)
+        let t = HistoryTotals(json: Data("not json".utf8), optimizeRuns: 3, uninstalls: 0)
         XCTAssertEqual(t.uninstalled, 0)
         XCTAssertEqual(t.cleanedBytes, 0)
         XCTAssertEqual(t.optimized, 3)

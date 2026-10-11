@@ -7,8 +7,7 @@ final class OptimizeNoAdminTests: XCTestCase {
     func testSudoPromptIsEndedWithoutAskingAnyone() async {
         let script = #"echo start; stty -echo; printf '%s' "$SUDO_PROMPT"; IFS= read -r p; echo "rc=$? len=${#p}"; echo after"#
         let session = PTYSession("/bin/bash", ["-c", script])
-        let responder = PromptResponder(reason: "", policy: .optimize)
-        responder.askPassword = { _ in XCTFail("Optimize must never ask for a password"); return nil }
+        let responder = PromptResponder(policy: .optimize)
         var lines: [String] = []
         for await line in session.lines {
             if !responder.handle(line, session) { lines.append(line) }
@@ -17,7 +16,6 @@ final class OptimizeNoAdminTests: XCTestCase {
         XCTAssertTrue(lines.contains("after"), "\(lines)")
         XCTAssertTrue(responder.adminSkipped)
         XCTAssertEqual(responder.skippedPrompts, [])
-        XCTAssertEqual(responder.stalePasswordsDiscarded, 0)
     }
 
     func testShimMakesSudoUnavailable() async throws {
@@ -30,7 +28,7 @@ final class OptimizeNoAdminTests: XCTestCase {
         XCTAssertEqual(env["MOLE_PAM_SUDO_FILE"], "/dev/null")
         let script = #"echo "which=$(command -v sudo)"; sudo -k; echo k=$?; sudo -v; echo v=$?; sudo -n true; echo n=$?"#
         let session = PTYSession("/bin/bash", ["-c", script], environment: env)
-        let responder = PromptResponder(reason: "", policy: .optimize)
+        let responder = PromptResponder(policy: .optimize)
         var lines: [String] = []
         for await line in session.lines {
             if !responder.handle(line, session) { lines.append(line) }

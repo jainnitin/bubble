@@ -91,12 +91,16 @@ final class UninstallModel {
     /// path and never measured, so macOS never asks "access data from other apps".
     @ObservationIgnored private(set) var fullDiskAccess = false
     @ObservationIgnored let checkFullDiskAccess: @Sendable () -> Bool
+    /// Where removed apps are counted for the menu bar's Uninstalled total.
+    @ObservationIgnored let historyDefaults: UserDefaults
 
     init(roots: AppRoots = .live, remover: AppRemover? = nil,
-         checkFullDiskAccess: @escaping @Sendable () -> Bool = { SystemSettings.hasFullDiskAccess }) {
+         checkFullDiskAccess: @escaping @Sendable () -> Bool = { SystemSettings.hasFullDiskAccess },
+         historyDefaults: UserDefaults = .standard) {
         self.roots = roots
         self.remover = remover ?? AppRemover(roots: roots)
         self.checkFullDiskAccess = checkFullDiskAccess
+        self.historyDefaults = historyDefaults
     }
 
     var visible: [AppInfo] {
@@ -355,6 +359,8 @@ final class UninstallModel {
             }
         }
         summary = s
+        // Mole's history never sees native removals, so Bubble counts them itself.
+        HistoryTotals.recordUninstall(count: s.removed.count, defaults: historyDefaults)
 
         let gone = Set(results.filter(\.removed).map(\.app.id))
         apps.removeAll { gone.contains($0.id) }

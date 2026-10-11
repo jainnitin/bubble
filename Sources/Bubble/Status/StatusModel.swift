@@ -190,18 +190,24 @@ final class StatusModel {
 /// - clean/purge/installer/uninstall sessions count only when they actually
 ///   removed or trashed something (`actions.removed + actions.trashed > 0`);
 /// - optimize sessions can't be told apart from dry runs, so the Optimized
-///   figure is Bubble's own counter of real optimize runs (`recordOptimizeRun()`).
+///   figure is Bubble's own counter of real optimize runs (`recordOptimizeRun()`);
+/// - Bubble removes apps natively, which Mole never records, so Uninstalled adds
+///   Bubble's own count of removed apps (`recordUninstall(count:)`) to the old
+///   `mo uninstall` sessions. The two never overlap.
 struct HistoryTotals: Equatable {
     var cleanedBytes: Double = 0
     var uninstalled = 0
     var optimized = 0
 
     static let optimizeRunsKey = "bubbleOptimizeRuns"
+    static let uninstallsKey = "bubbleUninstalledApps"
 
     init() {}
 
-    init(json: Data, optimizeRuns: Int = HistoryTotals.optimizeRunCount()) {
+    init(json: Data, optimizeRuns: Int = HistoryTotals.optimizeRunCount(),
+         uninstalls: Int = HistoryTotals.uninstallCount()) {
         optimized = optimizeRuns
+        uninstalled = uninstalls
         guard let obj = try? JSONSerialization.jsonObject(with: json) as? [String: Any],
               let sessions = obj["sessions"] as? [[String: Any]] else { return }
         for s in sessions {
@@ -231,5 +237,15 @@ struct HistoryTotals: Equatable {
 
     static func optimizeRunCount(defaults: UserDefaults = .standard) -> Int {
         defaults.integer(forKey: optimizeRunsKey)
+    }
+
+    /// Call after Bubble's own app removal with the number of apps actually removed.
+    static func recordUninstall(count: Int, defaults: UserDefaults = .standard) {
+        guard count > 0 else { return }
+        defaults.set(uninstallCount(defaults: defaults) + count, forKey: uninstallsKey)
+    }
+
+    static func uninstallCount(defaults: UserDefaults = .standard) -> Int {
+        defaults.integer(forKey: uninstallsKey)
     }
 }
