@@ -186,6 +186,31 @@ final class ShellSecurityTests: XCTestCase {
         }
     }
 
+    func testAdminQuotingSurvivesQuotesAndSpaces() throws {
+        let path = tmp.appendingPathComponent("it's a \"test\" $(touch pwned) `x` dir").path
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/bin/sh")
+        p.arguments = ["-c", "printf %s " + Admin.quote(path)]
+        p.currentDirectoryURL = tmp
+        let out = Pipe()
+        p.standardOutput = out
+        try p.run()
+        p.waitUntilExit()
+        XCTAssertEqual(String(decoding: out.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self), path)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: tmp.appendingPathComponent("pwned").path))
+    }
+
+    func testAdminScriptMovesQuotedPathIntoTrash() async throws {
+        let mac = try FakeMac()
+        let odd = try mac.file(mac.sys("Application Support/com.example.odd 'quoted' \"name\" $HOME"))
+        let r = mac.remover()
+        let script = r.adminScript([RemovalItem(path: odd, bytes: 0, isSystem: true)])
+        XCTAssertTrue(script.contains(Admin.quote(odd)))
+        let outcome = await r.removeWithAdmin([PendingAdmin(owner: 0, item: RemovalItem(path: odd, bytes: 0, isSystem: true))], prompt: "p")
+        XCTAssertEqual(outcome.removed, [odd])
+        XCTAssertEqual(mac.trashContents(), [(odd as NSString).lastPathComponent])
+    }
+
     func testExternalURLGuard() {
         for ok in ["https://github.com/tw93/Mole", "HTTPS://brew.sh", "macappstore://apps.apple.com/app/id497799835"] {
             XCTAssertTrue(Safety.isAllowedExternalURL(URL(string: ok)!), ok)

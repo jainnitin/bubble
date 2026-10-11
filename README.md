@@ -16,9 +16,9 @@
 </p>
 
 Bubble puts a friendly window on top of Mole's `mo` command-line tool: clean caches, uninstall apps
-with their leftovers, run maintenance, map your disk and watch your Mac's vitals. It doesn't
-reimplement any cleaning logic: every cleanup runs `mo`, so Mole's safety rules, protected items
-and history apply exactly as they do in Terminal.
+with their leftovers, run maintenance, map your disk and watch your Mac's vitals. Every cleanup
+runs `mo`, so Mole's safety rules, protected items and history apply exactly as they do in
+Terminal. The one exception is uninstalling apps, which Bubble does natively (see below).
 
 ## Install
 
@@ -34,7 +34,7 @@ Bubble is signed and notarized by Apple and updates itself.
 | Section | What it does |
 |---|---|
 | **Clean** | Runs `mo clean --dry-run`, then reads `~/.config/mole/clean-list.txt` so you can review and untick items before `mo clean`. Unticked items are protected for that one run by temporarily adding them to `~/.config/mole/whitelist` (restored right after, or on the next launch if Bubble quit mid-clean). |
-| **Apps ▸ Uninstall** | `mo uninstall --list`, then `mo uninstall --dry-run NAME` to preview each app's leftovers, then `mo uninstall NAME…`. Bubble confirms Mole's prompt only when the apps Mole matched are exactly the ones you picked. |
+| **Apps ▸ Uninstall** | Native, no `mo`. Lists apps in `/Applications` and `~/Applications` (Apple and protected apps are hidden). Leftovers are matched by exact bundle id, or by exact app name in a few `~/Library` folders, and shown before anything is removed. Open apps are asked to quit. Homebrew casks are removed with `brew uninstall --cask --zap`; everything else goes to the Trash. System files (for example in `/Library/LaunchDaemons`) are moved after one macOS authorization prompt, which accepts Touch ID. Without Full Disk Access, other apps' containers are only checked by exact path, never read or measured. |
 | **Apps ▸ Updates** | Homebrew casks (`brew outdated --cask --greedy`), the App Store lookup API and Sparkle appcasts. Homebrew apps update in place; the rest open the App Store or the download page. |
 | **Apps ▸ Startup** | Launch agents and daemons from `~/Library/LaunchAgents`, `/Library/LaunchAgents` and `/Library/LaunchDaemons`. Your agents can be switched on and off with `launchctl`; daemons are view-only. |
 | **Optimize** | `mo optimize`, with live progress per task. Mole runs without admin rights; Bubble then flushes the DNS cache (and rebuilds Spotlight when Mole finds it slow) itself, behind one Touch ID or macOS authorization prompt. "Include admin tasks" turns that step off, and then nothing asks for anything. Without Full Disk Access, the tasks that read other apps' data (Mail, Messages and Safari databases, notifications, usage data, shared file lists) are skipped for the run, so macOS doesn't pop up privacy prompts. |
@@ -51,12 +51,11 @@ Also:
   version and updates.
 - **Keep Screen On** and **Clean Screen** (a black screen to wipe it), from the Bubble menu.
 
-Uninstall and Optimize run inside a pseudo-terminal so Mole's prompts can be answered. For
-Uninstall, when Mole needs admin rights, Bubble shows a password field and types it into sudo's
-prompt. Optimize never asks for a password: Mole gets no `sudo`, and Bubble runs the admin tasks
-itself afterwards, through `sudo` with Touch ID when Touch ID for sudo is on (Checkup can turn it
-on), otherwise through the macOS authorization dialog. Every other prompt Mole shows is declined
-with a safe answer and listed as "Skipped".
+Optimize runs `mo optimize` inside a pseudo-terminal so Mole's prompts can be answered. It never
+asks for a password: Mole gets no `sudo`, and Bubble runs the admin tasks itself afterwards,
+through `sudo` with Touch ID when Touch ID for sudo is on (Checkup can turn it on), otherwise
+through the macOS authorization dialog. Every other prompt Mole shows is declined with a safe
+answer and listed as "Skipped".
 
 ## Requirements
 
@@ -119,17 +118,17 @@ Bubble has no analytics, telemetry or crash reporting, and no account.
   GitHub), updating a Homebrew app, and the "is Mole up to date" check in Checkup and Settings,
   which asks Homebrew.
 
-**Your admin password** is typed into `sudo`'s prompt once, when Mole asks for it during
-Uninstall. Bubble never saves it, in the Keychain or anywhere else, and scrubs it
-from the output it shows in case the terminal echoes it.
+**Your admin password** never passes through Bubble. Admin tasks (Optimize's DNS flush, removing
+system files during Uninstall) are approved with Touch ID through `sudo` when Touch ID for sudo is
+on, or in the macOS authorization dialog.
 
 **Permissions**
 - *Full Disk Access* (optional) lets Mole see the Trash, Mail and other protected caches. macOS
   extends it to the tools Bubble runs: `mo`, `brew`, and developer tools such as `npm`, `pip` and
   `go` that Clean asks to clear their caches.
-- *Administrator password* for the tasks above.
+- *Administrator approval* (Touch ID or password, in a macOS dialog) for the tasks above.
 - *Automation*: some of Mole's steps use `osascript` (listing running apps through System Events,
-  removing an uninstalled app's login items, moving files to the Trash through Finder), so macOS
+  moving files to the Trash through Finder), so macOS
   may ask whether Bubble can control Finder or System Events.
 - *Open at login*, only if you turn it on in Settings.
 
