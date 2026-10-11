@@ -11,8 +11,8 @@ struct PromptTicket: Equatable {
 }
 
 /// Runs a command inside a pseudo-terminal (via /usr/bin/script) so that Mole
-/// behaves exactly as in Terminal: `sudo` can prompt for a password and Mole's
-/// own confirmations work. The caller answers prompts with `send`.
+/// behaves exactly as in Terminal: Mole's own confirmations work, and a `sudo` prompt
+/// shows up as a prompt Bubble can answer or decline. The caller answers with `send`.
 ///
 /// Text that ends without a newline and then sits idle for `promptIdle` seconds
 /// is yielded as a *pending prompt*. `isPendingPrompt(_:)` tells whether the line
@@ -31,6 +31,10 @@ final class PTYSession: @unchecked Sendable {
     private let input = Pipe()
     private let state = State()
     static let promptIdle: TimeInterval = 0.15
+    /// Ctrl-D. Typed at sudo's password prompt it ends input, so sudo gives up at once
+    /// ("no password was provided") instead of counting an empty password as a failed
+    /// attempt and asking twice more.
+    static let endOfInput = "\u{4}"
     /// How long typed secrets are scrubbed from output in case the terminal echoes them.
     static let redactFor: TimeInterval = 30
 
@@ -39,8 +43,14 @@ final class PTYSession: @unchecked Sendable {
         var generation = 0
         var chunks = 0
         var finished = false
+        var launched = false
         var lastDelivered: (line: String, prompt: Bool, chunks: Int)?
         var secrets: [(length: Int, digest: SHA256.Digest, until: Date)] = []
+
+        func isLaunched() -> Bool {
+            lock.lock(); defer { lock.unlock() }
+            return launched
+        }
 
         func deliver(_ line: String, prompt: Bool, chunks: Int) {
             lock.lock(); defer { lock.unlock() }
@@ -60,7 +70,8 @@ final class PTYSession: @unchecked Sendable {
         return "Bubble sudo password " + bytes.map { String(format: "%02x", $0) }.joined() + ":"
     }
 
-    init(_ exe: String, _ args: [String]) {
+    /// - Parameter environment: extra variables for the child, on top of `Shell.childEnvironment`.
+    init(_ exe: String, _ args: [String], environment: [String: String] = [:]) {
         arguments = args
         let sudoPrompt = Self.makeSudoPrompt()
         self.sudoPrompt = sudoPrompt
@@ -68,7 +79,7 @@ final class PTYSession: @unchecked Sendable {
         let state = self.state
         let refusal = Shell.refusal(exe)
         let process = Shell.makeProcess("/usr/bin/script", ["-q", "/dev/null", exe] + args,
-                                        environment: Shell.childEnvironment(["COLUMNS": "160", "SUDO_PROMPT": sudoPrompt]))
+                                        environment: Shell.childEnvironment(environment.merging(["COLUMNS": "160", "SUDO_PROMPT": sudoPrompt]) { _, own in own }))
         self.process = process
         let out = Pipe()
         process.standardOutput = out
@@ -108,7 +119,10 @@ final class PTYSession: @unchecked Sendable {
             cont.onTermination = { _ in
                 if process.isRunning { process.terminate() }
             }
-            do { try process.run() } catch {
+            do {
+                try process.run()
+                state.lock.lock(); state.launched = true; state.lock.unlock()
+            } catch {
                 cont.yield(("Failed to launch: \(error.localizedDescription)", false, 0))
                 cont.finish()
             }
@@ -207,6 +221,19 @@ final class PTYSession: @unchecked Sendable {
         return String(out)
     }
 
+    /// Waits for the command to exit and returns its exit status (`script` passes the
+    /// command's own status through); nil when it never started.
+    func exitStatus() async -> Int32? {
+        guard state.isLaunched() else { return nil }
+        let process = self.process
+        return await withCheckedContinuation { cont in
+            DispatchQueue.global(qos: .userInitiated).async {
+                process.waitUntilExit()
+                cont.resume(returning: process.terminationStatus)
+            }
+        }
+    }
+
     func terminate() {
         if process.isRunning { process.terminate() }
     }
@@ -218,7 +245,8 @@ final class PTYSession: @unchecked Sendable {
     }
 }
 
-/// What the admin-password dialog says and how long it waits.
+/// What the admin-password dialog says and how long it waits. Only `mo uninstall` still
+/// uses it; Optimize never types a password (see `PromptPolicy.optimize`).
 struct AdminRequest: Equatable {
     /// e.g. "mo optimize"
     var command: String
@@ -291,7 +319,10 @@ enum PromptKind: Equatable {
 
 /// Which prompts a run may answer on the user's behalf.
 enum PromptPolicy: Equatable {
-    /// `mo optimize`: only sudo's password prompt. Everything else is declined.
+    /// `mo optimize`: runs without admin rights. sudo's password prompt is ended with
+    /// Ctrl-D straight away (no dialog), so Mole skips its admin tasks; Bubble runs its
+    /// own versions afterwards behind the system authorization dialog. Every other
+    /// prompt is declined.
     case optimize
     /// `mo uninstall`: the "[y/N]" confirmation (only when Mole's matched apps equal
     /// `expectedApps` exactly), then the "Enter confirm" step and sudo's password.
@@ -313,6 +344,9 @@ enum PromptPolicy: Equatable {
 enum PromptReply: Equatable {
     /// Ask the user for their admin password and type it.
     case password
+    /// Decline sudo's prompt without asking anyone: type Ctrl-D so sudo gives up after one
+    /// prompt. Expected, so it isn't listed in `skippedPrompts`.
+    case skipAdmin
     /// An allowed answer.
     case answer(String)
     /// A declined prompt: type this safe default.
@@ -338,6 +372,9 @@ final class PromptResponder {
     private(set) var skippedPrompts: [String] = []
     /// Set when `mo uninstall` matched different apps than expected; the run was declined.
     private(set) var matchError: String?
+
+    /// True once sudo's prompt was declined because this run doesn't use admin rights.
+    private(set) var adminSkipped = false
 
     /// Times a password was typed in the dialog but thrown away because sudo had
     /// moved on (more output arrived, or the run ended) by the time it was entered.
@@ -377,12 +414,12 @@ final class PromptResponder {
         let reply = Self.decide(kind: kind, policy: policy, matchOK: matchOK, proceedConfirmed: proceedConfirmed)
         switch reply {
         case .password:
-            // Empty input makes sudo give up, and Mole carries on without admin tasks.
+            // Ctrl-D makes sudo give up at once, and Mole carries on without admin tasks.
             let command = (["mo"] + session.arguments.prefix(1)).joined(separator: " ")
             guard !declined, attempts < 3,
                   let pw = askPassword(AdminRequest(command: command, reason: reason, retry: attempts > 0)) else {
                 declined = true
-                session.send("\n", ifCurrent: ticket)
+                session.send(PTYSession.endOfInput, ifCurrent: ticket)
                 return true
             }
             if session.sendSecret(pw, ifCurrent: ticket) {
@@ -392,6 +429,9 @@ final class PromptResponder {
                 // password is dropped; if sudo asks again, the next prompt asks again.
                 stalePasswordsDiscarded += 1
             }
+        case .skipAdmin:
+            adminSkipped = true
+            session.send(PTYSession.endOfInput, ifCurrent: ticket)
         case .answer(let text):
             if session.send(text, ifCurrent: ticket), kind == .uninstallProceed { proceedConfirmed = true }
         case .decline(let text):
@@ -423,7 +463,7 @@ final class PromptResponder {
     nonisolated static func decide(kind: PromptKind, policy: PromptPolicy, matchOK: Bool, proceedConfirmed: Bool) -> PromptReply {
         switch (kind, policy) {
         case (.sudoPassword, .optimize):
-            return .password
+            return .skipAdmin
         case (.sudoPassword, .uninstall):
             // Homebrew casks and system apps need admin rights, but only once the
             // user's exact selection was confirmed.

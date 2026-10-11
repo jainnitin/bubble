@@ -135,7 +135,7 @@ final class PromptPolicyTests: XCTestCase {
 
     func testOptimizeOnlyAnswersSudo() {
         let d = { (k: PromptKind) in PromptResponder.decide(kind: k, policy: .optimize, matchOK: true, proceedConfirmed: true) }
-        XCTAssertEqual(d(.sudoPassword), .password)
+        XCTAssertEqual(d(.sudoPassword), .skipAdmin)
         XCTAssertEqual(d(PromptResponder.classify("◎ Detach now? Enter confirm / Space cancel:")), .decline(" "))
         XCTAssertEqual(d(.uninstallProceed), .decline("n\n"))
         XCTAssertEqual(d(.uninstallRemoveConfirm), .decline("q"))

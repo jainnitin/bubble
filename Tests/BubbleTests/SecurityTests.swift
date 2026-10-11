@@ -235,9 +235,19 @@ final class SudoPromptTests: XCTestCase {
         XCTAssertEqual(PTYSession.redact("hunter", length: 7, digest: d), "hunter")
     }
 
+    /// Only `mo uninstall` still types a password, and only after the user's exact
+    /// selection was confirmed, so each script starts with that confirmation.
+    private static let confirmed = #"""
+    echo "◎ Matched 1 app(s):"
+    echo "1. Xcode  3.96GB  |  Last: 5d ago"
+    echo
+    printf "Proceed with uninstallation? [y/N] "; read -r a
+
+    """#
+
     private func run(_ script: String, answer: @escaping @MainActor (AdminRequest) -> String?) async -> (lines: [String], responder: PromptResponder, asked: [AdminRequest]) {
-        let session = PTYSession("/bin/bash", ["-c", script])
-        let responder = PromptResponder(reason: "Test reason.", policy: .optimize)
+        let session = PTYSession("/bin/bash", ["-c", Self.confirmed + script])
+        let responder = PromptResponder(reason: "Test reason.", policy: .uninstall(expectedApps: ["Xcode"]))
         var asked: [AdminRequest] = []
         responder.askPassword = { asked.append($0); return answer($0) }
         var lines: [String] = []
@@ -280,11 +290,13 @@ final class SudoPromptTests: XCTestCase {
         XCTAssertEqual(r.skippedPrompts, ["Password:"])
     }
 
-    func testSkipSendsEmptyLine() async {
-        let script = #"printf '%s' "$SUDO_PROMPT"; IFS= read -r p; echo "len=${#p}""#
+    func testSkipEndsInput() async {
+        // Ctrl-D, not an empty line: sudo gives up at once instead of counting a failed
+        // attempt and asking again. `read` sees end of file (status 1).
+        let script = #"stty -echo; printf '%s' "$SUDO_PROMPT"; IFS= read -r p; echo "rc=$? len=${#p}""#  // sudo turns echo off
         let (lines, _, asked) = await run(script) { _ in nil }
         XCTAssertEqual(asked.count, 1)
-        XCTAssertTrue(lines.contains("len=0"), "\(lines)")
+        XCTAssertTrue(lines.contains("rc=1 len=0"), "\(lines)")
     }
 }
 

@@ -17,14 +17,33 @@ struct OptimizeTask: Identifiable {
 @MainActor
 final class OptimizeModel {
     enum Phase { case idle, running, done }
+    /// What happened to the admin step this run.
+    enum AdminOutcome: Equatable {
+        /// Mole didn't skip anything that needs admin rights (or the run was stopped first).
+        case notNeeded
+        /// Admin tasks are switched off; Mole's admin tasks were skipped.
+        case off
+        /// Nothing to authorize (e.g. the DNS flush was skipped for a VPN).
+        case nothingToDo
+        case ran
+        case cancelled
+        case failed
+    }
+
+    static let adminTasksKey = "optimizeAdminTasks"
+    /// The admin step gives up after this long with nobody answering.
+    static let adminTimeout: TimeInterval = 300
+
     var phase: Phase = .idle
     var plannedCount = 0
     var tasks: [OptimizeTask] = []
-    var skippedAdmin = false
+    var adminOutcome: AdminOutcome = .notNeeded
+    /// True while the authorization (Touch ID sheet or dialog) is up or the admin script runs.
+    var authorizing = false
+    /// Admin rows Bubble expects to add this run, for the progress total.
+    var expectedAdminRows = 0
     /// Prompts Mole showed that Bubble declined rather than confirm on your behalf.
     var skippedPrompts: [String] = []
-    /// Passwords typed after sudo had moved on, which Bubble discarded unsent.
-    var stalePasswordsDiscarded = 0
     /// The user pressed Stop during this run.
     var stopped = false
     private var job: Task<Void, Never>?
@@ -33,6 +52,9 @@ final class OptimizeModel {
     /// adds an entry to Mole's history, so it runs once, when Optimize is first shown.
     private static var sessionPlan: Int?
     private var planning = false
+
+    /// Progress total: Mole's planned tasks plus Bubble's admin rows.
+    var total: Int { max(plannedCount + expectedAdminRows, tasks.count, 1) }
 
     /// A dry run lists every task Mole will run, so progress can show "5 / 21".
     func plan() async {
@@ -50,29 +72,43 @@ final class OptimizeModel {
         plannedCount = n
     }
 
-    func run() {
+    /// - Parameter adminTasks: afterwards, run the admin tasks Mole skipped behind one
+    ///   authorization. Off means nothing asks for anything.
+    func run(adminTasks: Bool) {
         guard phase != .running, let mo = Shell.mo else { return }
         phase = .running
         tasks = []
         skippedPrompts = []
-        skippedAdmin = false
+        adminOutcome = .notNeeded
+        authorizing = false
         stopped = false
-        stalePasswordsDiscarded = 0
+        expectedAdminRows = adminTasks ? 1 : 0
         job = Task {
-            // Run in a pseudo-terminal so Mole can ask for the admin password.
-            let session = PTYSession(mo, ["optimize"])
-            let responder = PromptResponder(reason: "Flushing DNS, rebuilding Spotlight and other system maintenance. Skip to run the rest without it.")
+            // Mole runs without admin rights: sudo is unavailable to it, and should its
+            // password prompt appear anyway, the responder ends it at once (no dialog).
+            let shim = MoleNoSudo.make()
+            defer { MoleNoSudo.remove(shim) }
+            let session = PTYSession(mo, ["optimize"], environment: MoleNoSudo.environment(shimDir: shim))
+            let responder = PromptResponder(reason: "", policy: .optimize)
+            var log = OptimizeLog(adminTasksOn: adminTasks)
             for await line in session.lines {
                 if responder.handle(line, session) { continue }
-                if line.hasPrefix("➤") {
-                    tasks.append(OptimizeTask(name: line.dropFirst().trimmingCharacters(in: .whitespaces)))
-                } else if !tasks.isEmpty, let first = line.first, "→◎-✓✗".contains(first) {
-                    tasks[tasks.count - 1].results.append(line)
-                }
-                if line.contains("admin access not granted") || line.contains("admin access required") { skippedAdmin = true }
+                log.consume(line)
+                tasks = log.tasks
+                // Mole says up front when it has no admin rights; if it reached a task
+                // without saying so, it had them and did the admin work itself.
+                if !log.moleSkippedAdmin && !responder.adminSkipped && !tasks.isEmpty { expectedAdminRows = 0 }
             }
             skippedPrompts = responder.skippedPrompts
-            stalePasswordsDiscarded = responder.stalePasswordsDiscarded
+            let moleSkippedAdmin = log.moleSkippedAdmin || responder.adminSkipped
+            if !stopped && !Task.isCancelled && !tasks.isEmpty && moleSkippedAdmin {
+                if adminTasks {
+                    await runAdminTasks(spotlight: log.deferred.contains(.spotlight))
+                } else {
+                    adminOutcome = .off
+                }
+            }
+            expectedAdminRows = 0
             phase = .done
             // Mole's history can't tell real optimize runs from dry runs, so Bubble counts
             // its own real runs (any that got as far as running a task, stopped or not).
@@ -81,16 +117,78 @@ final class OptimizeModel {
         }
     }
 
-    /// Stops Mole between steps (cancelling the task terminates the process).
+    /// The admin tasks Mole skipped, as rows in the same list, under one authorization.
+    private func runAdminTasks(spotlight: Bool) async {
+        var jobs: Set<OptimizeAdmin.Job> = []
+        let vpn = await OptimizeAdmin.detectVPN()
+        tasks.append(OptimizeTask(name: OptimizeAdmin.Job.dns.taskName))
+        if let skip = OptimizeAdmin.vpnSkipLine(vpn) {
+            tasks[tasks.count - 1].results = [skip]
+        } else {
+            jobs.insert(.dns)
+        }
+        if spotlight {
+            jobs.insert(.spotlight)
+            tasks.append(OptimizeTask(name: OptimizeAdmin.Job.spotlight.taskName))
+        }
+        guard !jobs.isEmpty, !stopped else {
+            adminOutcome = .nothingToDo
+            return
+        }
+        authorizing = true
+        defer { authorizing = false }
+        let result: [OptimizeAdmin.Job: Bool]
+        do {
+            let out = try await Admin.run(OptimizeAdmin.script(for: jobs), prompt: OptimizeAdmin.prompt(for: jobs),
+                                          timeout: Self.adminTimeout)
+            result = OptimizeAdmin.parse(out)
+            adminOutcome = .ran
+        } catch Admin.Failure.cancelled {
+            adminOutcome = .cancelled
+            fill(jobs) { _ in "- Skipped, not authorized" }
+            return
+        } catch {
+            adminOutcome = .failed
+            let reason: String = if case Admin.Failure.failed(let why) = error { why } else { error.localizedDescription }
+            fill(jobs) { _ in "◎ Couldn't run: \(reason)" }
+            return
+        }
+        fill(jobs) { job in result[job].map { job.resultLine(ok: $0) } ?? "◎ No result reported" }
+    }
+
+    private func fill(_ jobs: Set<OptimizeAdmin.Job>, _ line: (OptimizeAdmin.Job) -> String) {
+        for job in jobs {
+            if let i = tasks.lastIndex(where: { $0.name == job.taskName }) { tasks[i].results = [line(job)] }
+        }
+    }
+
+    /// Stops Mole between steps (cancelling the task terminates the process), or
+    /// withdraws the authorization request if it's up.
     func stop() {
         guard phase == .running else { return }
         stopped = true
         job?.cancel()
     }
+
+    /// The line under "Maintenance complete".
+    static func summary(taskCount: Int, issues: Int, stopped: Bool, admin: AdminOutcome) -> String {
+        var s = stopped ? "Stopped after \(taskCount) tasks" : "\(taskCount) tasks ran"
+        if issues > 0 { s += ", \(issues) need a look" }
+        s += "."
+        switch admin {
+        case .off: s += " Admin tasks are off, so the ones that need admin rights were skipped."
+        case .cancelled: s += " Admin tasks were skipped because they weren't authorized."
+        case .notNeeded, .nothingToDo, .ran, .failed: break
+        }
+        return s
+    }
 }
 
 struct OptimizeView: View {
     @State private var model = OptimizeModel()
+    @AppStorage(OptimizeModel.adminTasksKey) private var adminTasks = true
+    /// Touch ID for sudo is set up, so the admin step can use it.
+    @State private var touchID = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.screenVisible) private var visible
 
@@ -114,15 +212,19 @@ struct OptimizeView: View {
         .motion(model.phase == .done)
         .sensoryFeedback(.success, trigger: model.phase == .done)
         // Only once Optimize is actually opened (screens are built at launch).
-        .task(id: visible) { if visible { await model.plan() } }
+        .task(id: visible) {
+            guard visible else { return }
+            touchID = Admin.touchIDForSudo()
+            await model.plan()
+        }
     }
 
     @ViewBuilder
     private var heroContent: some View {
         if model.phase == .running {
-            let total = max(model.plannedCount, model.tasks.count, 1)
+            let total = model.total
             VStack(alignment: .leading, spacing: Space.l) {
-                Headline(text: "Running maintenance")
+                Headline(text: model.authorizing ? "Finishing admin tasks" : "Running maintenance")
                 VStack(alignment: .leading, spacing: Space.s) {
                     ProgressView(value: Double(model.tasks.count), total: Double(total))
                         .progressViewStyle(.linear)
@@ -142,10 +244,22 @@ struct OptimizeView: View {
             VStack(alignment: .leading, spacing: Space.l) {
                 Headline(text: "Keep things running smoothly")
                 Lede(text: "Flush DNS, refresh Finder and Spotlight caches, repair preferences and tidy what slows your Mac down.")
-                PillButton(title: "Run maintenance") { model.run() }.padding(.top, Space.s)
-                Hint(icon: "lock", text: "Takes about a minute. Some tasks ask for your password.")
+                PillButton(title: "Run maintenance") { model.run(adminTasks: adminTasks) }.padding(.top, Space.s)
+                Toggle(touchID ? "Include admin tasks (Touch ID)" : "Include admin tasks", isOn: $adminTasks)
+                    .toggleStyle(.checkbox)
+                    .font(.ui(.secondary))
+                    .foregroundStyle(Palette.secondary)
+                    .help("Flush the DNS cache, and rebuild the Spotlight index if Mole finds it slow. These need admin rights, so you approve them once at the end.")
+                Hint(icon: adminTasks ? "lock" : "lock.open", text: hint)
             }
         }
+    }
+
+    private var hint: String {
+        guard adminTasks else { return "Takes about a minute. Nothing asks for a password." }
+        return touchID
+            ? "Takes about a minute. At the end, Touch ID approves the admin tasks once."
+            : "Takes about a minute. At the end, macOS asks once for your password to approve the admin tasks."
     }
 
     private var results: some View {
@@ -161,7 +275,7 @@ struct OptimizeView: View {
                     }
                 }
                 Spacer()
-                PillButton(title: "Run again", width: 180) { model.run() }
+                PillButton(title: "Run again", width: 180) { model.run(adminTasks: adminTasks) }
             }
             .padding(.bottom, Space.l)
             // One panel with dividers rather than a card per task.
@@ -193,13 +307,7 @@ struct OptimizeView: View {
 
     private var summary: String {
         let issues = model.tasks.filter { $0.symbol.0 == "exclamationmark.circle" }.count
-        var s = model.stopped ? "Stopped after \(model.tasks.count) tasks" : "\(model.tasks.count) tasks ran"
-        if issues > 0 { s += ", \(issues) need a look" }
-        if model.skippedAdmin { s += ". Tasks that need admin rights were skipped." }
-        if model.stalePasswordsDiscarded > 0 {
-            s += (s.hasSuffix(".") ? " " : ". ") + "A password you typed arrived after Mole had moved on, so Bubble discarded it without sending it."
-        }
-        return s + (s.hasSuffix(".") ? "" : ".")
+        return OptimizeModel.summary(taskCount: model.tasks.count, issues: issues, stopped: model.stopped, admin: model.adminOutcome)
     }
 }
 

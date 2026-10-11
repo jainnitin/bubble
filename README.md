@@ -37,7 +37,7 @@ Bubble is signed and notarized by Apple and updates itself.
 | **Apps ▸ Uninstall** | `mo uninstall --list`, then `mo uninstall --dry-run NAME` to preview each app's leftovers, then `mo uninstall NAME…`. Bubble confirms Mole's prompt only when the apps Mole matched are exactly the ones you picked. |
 | **Apps ▸ Updates** | Homebrew casks (`brew outdated --cask --greedy`), the App Store lookup API and Sparkle appcasts. Homebrew apps update in place; the rest open the App Store or the download page. |
 | **Apps ▸ Startup** | Launch agents and daemons from `~/Library/LaunchAgents`, `/Library/LaunchAgents` and `/Library/LaunchDaemons`. Your agents can be switched on and off with `launchctl`; daemons are view-only. |
-| **Optimize** | `mo optimize`, with live progress per task. |
+| **Optimize** | `mo optimize`, with live progress per task. Mole runs without admin rights; Bubble then flushes the DNS cache (and rebuilds Spotlight when Mole finds it slow) itself, behind one Touch ID or macOS authorization prompt. "Include admin tasks" turns that step off, and then nothing asks for anything. |
 | **Analyze** | `mo analyze --json PATH`, drawn as a treemap you can drill into. Right-click to reveal, copy the path or move to the Trash. |
 | **Status** | `mo status --watch` (one JSON line per second) plus native readings: CPU and GPU temperatures and fan speed from the SMC, GPU use from IOKit, and the full process list with Quit and Force Quit. A compact version lives in the menu bar. |
 
@@ -51,9 +51,12 @@ Also:
   version and updates.
 - **Keep Screen On** and **Clean Screen** (a black screen to wipe it), from the Bubble menu.
 
-Uninstall and Optimize run inside a pseudo-terminal so `sudo` works: when Mole needs admin rights,
-Bubble shows a password field and types it into sudo's prompt. Every other prompt Mole shows is
-declined with a safe answer and listed as "Skipped".
+Uninstall and Optimize run inside a pseudo-terminal so Mole's prompts can be answered. For
+Uninstall, when Mole needs admin rights, Bubble shows a password field and types it into sudo's
+prompt. Optimize never asks for a password: Mole gets no `sudo`, and Bubble runs the admin tasks
+itself afterwards, through `sudo` with Touch ID when Touch ID for sudo is on (Checkup can turn it
+on), otherwise through the macOS authorization dialog. Every other prompt Mole shows is declined
+with a safe answer and listed as "Skipped".
 
 ## Requirements
 
@@ -117,7 +120,7 @@ Bubble has no analytics, telemetry or crash reporting, and no account.
   which asks Homebrew.
 
 **Your admin password** is typed into `sudo`'s prompt once, when Mole asks for it during
-Optimize or Uninstall. Bubble never saves it, in the Keychain or anywhere else, and scrubs it
+Uninstall. Bubble never saves it, in the Keychain or anywhere else, and scrubs it
 from the output it shows in case the terminal echoes it.
 
 **Permissions**
@@ -208,6 +211,7 @@ Sources/Bubble/
     Shell.swift          runs child processes: fixed mo/brew paths, scrubbed environment,
                          system-first PATH, executable trust check, line streaming
     PTY.swift            pseudo-terminal sessions, the sudo password dialog and prompt policy
+    Admin.swift          root scripts behind Touch ID (sudo) or the macOS authorization dialog
     Safety.swift         pure guards: Move to Trash, uninstall matching, command arguments, links
     Theme.swift          palette, type scale, spacing, motion and shared modifiers
     Components.swift     shared views: cards, buttons, hero layout, log box, section header
@@ -219,7 +223,7 @@ Sources/Bubble/
   Onboarding/            Mole detection, install and update, and the setup screens
   Clean/                 scan parsing, selection rules, the temporary whitelist
   Apps/                  Uninstall, Updates (appcasts, version comparison), Startup
-  Optimize/              mo optimize
+  Optimize/              mo optimize, and the admin tasks Bubble runs itself
   Analyze/               navigation model, view and squarified treemap
   Status/                mo status model, native sensors (SMC, GPU, processes), cards, menu bar panel
   Settings/              the window and its panes, including the Protected Items editor

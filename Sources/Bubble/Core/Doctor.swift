@@ -14,9 +14,10 @@ final class DoctorModel {
     }
 
     enum Fix {
-        case updateMole, setUpMole, openFullDiskAccess, restoreWhitelist, openAnalyze, runInTerminal(String)
+        case updateMole, setUpMole, openFullDiskAccess, restoreWhitelist, openAnalyze, runInTerminal(String), enableTouchID
         var title: String {
             switch self {
+            case .enableTouchID: "Turn On"
             case .updateMole: "Update Mole"
             case .setUpMole: "Set up Mole"
             case .openFullDiskAccess: "Open Settings"
@@ -66,11 +67,11 @@ final class DoctorModel {
             : Check(title: "Full Disk Access is off", detail: "Scans skip protected folders until you allow Bubble in System Settings.",
                     state: .warn, fix: .openFullDiskAccess))
 
-        let touchID = (try? String(contentsOfFile: "/etc/pam.d/sudo_local", encoding: .utf8))?.contains("pam_tid") == true
-        out.append(touchID
-            ? Check(title: "Touch ID works for admin tasks", detail: "Optimize and Uninstall can ask for Touch ID instead of a password.", state: .ok)
-            : Check(title: "Admin tasks ask for your password", detail: "Run mo touchid enable in Terminal to use Touch ID instead.",
-                    state: .warn, fix: .runInTerminal("mo touchid enable")))
+        out.append(Admin.touchIDForSudo()
+            ? Check(title: "Touch ID works for admin tasks", detail: "Bubble's admin tasks and sudo in Terminal can use Touch ID.", state: .ok)
+            : Check(title: "Admin tasks ask for your password",
+                    detail: "Turn on Touch ID for sudo so Bubble's admin tasks (and sudo in Terminal) can use your fingerprint.",
+                    state: .warn, fix: .enableTouchID))
 
         // Leftover state from an interrupted clean. A clean that is running right now
         // has a backup too; that's expected.
@@ -96,6 +97,50 @@ final class DoctorModel {
         checks = out
     }
 
+    // MARK: Touch ID for sudo
+
+    /// Root script that turns on pam_tid in /etc/pam.d/sudo_local (which survives macOS
+    /// updates): uncomments it if it's there, adds it first otherwise, or starts from Apple's
+    /// template. Writes a temporary file beside it and moves it into place.
+    nonisolated static let touchIDScript = """
+    set -e
+    f=/etc/pam.d/sudo_local
+    t=/etc/pam.d/sudo_local.template
+    line='auth       sufficient     pam_tid.so'
+    if [ -f "$f" ]; then
+      if grep -Eq '^[[:space:]]*#[[:space:]]*auth[[:space:]].*pam_tid\\.so' "$f"; then
+        sed -E 's/^[[:space:]]*#[[:space:]]*(auth[[:space:]].*pam_tid\\.so.*)$/\\1/' "$f" > "$f.bubble"
+      else
+        { printf '%s\\n' "$line"; cat "$f"; } > "$f.bubble"
+      fi
+    elif [ -f "$t" ]; then
+      sed 's/^#auth/auth/' "$t" > "$f.bubble"
+    else
+      printf '%s\\n' "$line" > "$f.bubble"
+    fi
+    chown root:wheel "$f.bubble"
+    chmod 444 "$f.bubble"
+    mv -f "$f.bubble" "$f"
+
+    """
+
+    /// What to paste in Terminal when Bubble can't write the file itself.
+    nonisolated static var touchIDTerminalCommand: String {
+        FileManager.default.fileExists(atPath: "/etc/pam.d/sudo_local")
+            ? "mo touchid enable"
+            : "sed 's/^#auth/auth/' /etc/pam.d/sudo_local.template | sudo tee /etc/pam.d/sudo_local"
+    }
+
+    nonisolated static func touchIDFailureMessage(_ error: Error) -> [String] {
+        let reason: String = if case Admin.Failure.failed(let why) = error { why } else { error.localizedDescription }
+        if reason.localizedCaseInsensitiveContains("Operation not permitted") {
+            return ["macOS blocked Bubble from changing /etc/pam.d. That needs Full Disk Access for Bubble.",
+                    "The command is on your clipboard instead: paste it into Terminal and press Return."]
+        }
+        return ["Couldn't turn on Touch ID for sudo: \(reason)",
+                "The command is on your clipboard: paste it into Terminal and press Return."]
+    }
+
     func apply(_ fix: Fix, openTab: (Tab) -> Void) async {
         switch fix {
         case .openFullDiskAccess: SystemSettings.openFullDiskAccess()
@@ -110,6 +155,17 @@ final class DoctorModel {
             return
         case .runInTerminal(let cmd):
             Clipboard.copy(cmd)
+        case .enableTouchID:
+            log = []
+            do {
+                _ = try await Admin.run(Self.touchIDScript, prompt: "Bubble wants to turn on Touch ID for sudo.")
+            } catch Admin.Failure.cancelled {
+                // Nothing changed; the check stays as it was.
+            } catch {
+                log = Self.touchIDFailureMessage(error)
+                Clipboard.copy(Self.touchIDTerminalCommand)
+                NSWorkspace.shared.open(URL(fileURLWithPath: "/System/Applications/Utilities/Terminal.app"))
+            }
         case .updateMole:
             // Same runner as setup and Settings: Homebrew or Mole's updater, dry run when simulating.
             let install = MoleInstall.shared
