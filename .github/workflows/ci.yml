@@ -1,0 +1,44 @@
+# Builds and tests every push and pull request. Read-only token, no secrets.
+# Actions are pinned to full commit SHAs (the comment names the tag); see release.yml for how to bump.
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions: {}
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: macos-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Select Xcode
+        run: |
+          XCODE=$( (ls -d /Applications/Xcode_*.app 2>/dev/null || true) | (grep -v -i beta || true) | sort -V | tail -1)
+          [ -n "$XCODE" ] || XCODE=/Applications/Xcode.app
+          echo "Using $XCODE"
+          echo "DEVELOPER_DIR=$XCODE/Contents/Developer" >> "$GITHUB_ENV"
+
+      - name: Resolve packages from Package.resolved only
+        run: swift package --force-resolved-versions resolve
+
+      - name: Build
+        run: swift build
+
+      - name: Build with debug hooks
+        run: swift build -Xswiftc -DBUBBLE_DEV
+
+      - name: Test
+        # Mole isn't installed on the runner; tests that need it skip themselves.
+        run: swift test

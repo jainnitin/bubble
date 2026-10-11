@@ -1,0 +1,23 @@
+# Build output
+.build/
+build/
+dist/
+*.app
+*.iconset/
+
+# SwiftPM and Xcode
+.swiftpm/
+xcuserdata/
+DerivedData/
+
+# Signing keys and certificates: never commit them
+*_ed25519
+*.pem
+*.p12
+*.p8
+*.key
+*.cer
+*.mobileprovision
+
+# macOS
+.DS_Store
