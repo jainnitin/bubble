@@ -142,4 +142,44 @@ final class CleanParsingTests: XCTestCase {
         XCTAssertEqual(Set(model.excludedPaths), ["/nix/store", NSHomeDirectory() + "/.conda/pkgs"])
         XCTAssertEqual(model.alwaysRunItems.map(\.title), ["Some future tool cache"])
     }
+
+    /// Governing keys are cached per scan; a new list must not keep the old answers.
+    @MainActor
+    func testGoverningFollowsNewCategories() {
+        let model = CleanModel()
+        let child = CleanItem(path: "/a/b", sizeText: "1MB", bytes: 0, count: 1, coveredBy: "/a")
+        model.categories = [CleanCategory(name: "One", items: [
+            CleanItem(path: "/a", sizeText: "2MB", bytes: 2, count: 1), child,
+        ])]
+        XCTAssertEqual(model.governingKey(child), "/a")
+        XCTAssertEqual(model.governingItem(child)?.path, "/a")
+
+        // Same row, now under a grandparent that is listed too.
+        let middle = CleanItem(path: "/a", sizeText: "2MB", bytes: 0, count: 1, coveredBy: "/")
+        model.categories = [CleanCategory(name: "One", items: [
+            CleanItem(path: "/", sizeText: "3MB", bytes: 3, count: 1), middle, child,
+        ])]
+        XCTAssertEqual(model.governingKey(child), "/")
+        model.toggle(child)
+        XCTAssertFalse(model.isSelected(middle))
+        XCTAssertEqual(Set(model.excludedPaths), ["/", "/a", "/a/b"])
+
+        // Parent no longer listed: the row governs itself by its parent's path.
+        model.categories = [CleanCategory(name: "One", items: [child])]
+        XCTAssertEqual(model.governingKey(child), "/a")
+        XCTAssertNil(model.governingItem(child))
+    }
+
+    func testArrangeAddsToolsInScanOrder() {
+        let preview = [
+            CleanCategory(name: "App caches", items: [CleanItem(path: "/c", sizeText: "1MB", bytes: 1, count: 1)]),
+            CleanCategory(name: "User essentials", items: [CleanItem(path: "/u", sizeText: "1MB", bytes: 1, count: 1)]),
+        ]
+        let npm = CleanItem(path: "/n", sizeText: "", bytes: 0, count: 1, toolRun: true, toolName: "npm cache")
+        let cats = CleanModel.arrange(preview, tools: [("Developer tools", npm), ("App caches", npm)],
+                                      order: ["User essentials", "App caches", "Developer tools"])
+        XCTAssertEqual(cats.map(\.name), ["User essentials", "App caches", "Developer tools"])
+        XCTAssertEqual(cats[1].items.count, 2)
+        XCTAssertEqual(cats[2].items.map(\.title), ["npm cache"])
+    }
 }

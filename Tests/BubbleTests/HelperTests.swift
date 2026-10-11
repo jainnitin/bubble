@@ -36,4 +36,20 @@ final class HelperTests: XCTestCase {
         for await l in Shell.lines("/bin/sh", ["-c", #"printf 'one\ntwo\r\n\n  three  \nlast'"#]) { lines.append(l) }
         XCTAssertEqual(lines, ["one", "two", "three", "last"])
     }
+
+    /// The process is started off the caller's thread; cancelling still stops it.
+    func testCancellingLinesTerminatesTheProcess() async throws {
+        let marker = FileManager.default.temporaryDirectory.appendingPathComponent("bubble-lines-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: marker) }
+        let reader = Task {
+            for await l in Shell.lines("/bin/sh", ["-c", "echo started; sleep 1; touch '\(marker.path)'"]) where l == "started" {
+                return true
+            }
+            return false
+        }
+        let sawStart = await reader.value
+        XCTAssertTrue(sawStart)
+        try await Task.sleep(nanoseconds: 1_500_000_000)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: marker.path))
+    }
 }
